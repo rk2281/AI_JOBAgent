@@ -10,6 +10,8 @@ from app.services.cv_extraction import ExtractionResult, extract_cv
 from app.services.cv_intake import CVIntakeService, CVValidationError
 from app.services.cv_text import UnsupportedCVFormat, extract_raw_text
 from app.services.onboarding import DocumentOutcome, OnboardingService
+from app.services.profile import ProfileService
+from app.services.profile_view import ProfileSnapshot, render_profile
 from app.services.replies import BotReply, Button
 
 __all__ = [
@@ -20,7 +22,10 @@ __all__ = [
     "DocumentOutcome",
     "ExtractionResult",
     "OnboardingService",
+    "ProfileService",
+    "ProfileSnapshot",
     "UnsupportedCVFormat",
     "extract_cv",
     "extract_raw_text",
+    "render_profile",
 ]

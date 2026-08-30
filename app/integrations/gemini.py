@@ -168,7 +168,18 @@ class GeminiClient:
         self.timeout_seconds = timeout_seconds
         self._client = genai.Client(
             api_key=api_key or settings.gemini_api_key,
-            http_options=types.HttpOptions(retry_options=_RETRY_OPTIONS),
+            http_options=types.HttpOptions(
+                retry_options=_RETRY_OPTIONS,
+                # HttpOptions.timeout is in MILLISECONDS (confirmed
+                # against the installed google-genai package:
+                # HttpOptions.timeout's docstring says so, and
+                # _api_client.get_timeout_in_seconds() divides it by
+                # 1000.0 before handing it to httpx). This is also the
+                # only place the SDK reads a timeout from — the
+                # timeout= kwarg on interactions.create() is silently
+                # ignored, so do not re-add it there.
+                timeout=int(timeout_seconds * 1000),
+            ),
         )
 
     async def extract_profile(self, raw_text: str) -> CVProfile:
@@ -186,10 +197,12 @@ class GeminiClient:
             # the only place a timeout can honestly be enforced.
             # asyncio.wait_for around a to_thread call abandons the
             # thread without cancelling it — the HTTP request keeps
-            # running, and whatever it was holding stays held. Passing
-            # timeout down to the underlying httpx client means the
-            # socket itself is closed when the deadline passes, so the
-            # work actually stops rather than being ignored.
+            # running, and whatever it was holding stays held.
+            #
+            # No timeout= kwarg here: interactions.create() silently
+            # ignores it. The timeout is set once, in __init__, via
+            # types.HttpOptions(timeout=...) at client construction —
+            # that is the only place the SDK actually reads it from.
             interaction = await self._client.aio.interactions.create(
                 model=self.model,
                 input=EXTRACTION_PROMPT.format(text=raw_text),
@@ -198,7 +211,6 @@ class GeminiClient:
                     "mime_type": "application/json",
                     "schema": _build_response_schema(),
                 },
-                timeout=self.timeout_seconds,
             )
         except Exception as error:  # noqa: BLE001 - provider errors are not typed here
             raise GeminiExtractionError(

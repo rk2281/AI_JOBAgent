@@ -150,3 +150,66 @@ class CVRepository:
         self._session.add(version)
         await self._session.flush()
         return version
+
+    async def mark_others_superseded(self, user_id: int, keep_cv_id: int) -> int:
+        """Stamp every other CV belonging to this user as superseded.
+
+        Returns how many rows were stamped, so a caller can log it.
+
+        A single UPDATE rather than a loop over loaded rows: the set of
+        rows to change is defined by a predicate, and expressing that
+        as a predicate lets Postgres do it atomically in one statement
+        instead of racing a second upload that is loading the same rows.
+
+        Only stamps rows where superseded_at IS NULL. Re-stamping an
+        already-superseded row would move its timestamp forward and
+        lose when the user actually replaced it.
+
+        updated_at is set explicitly for the same reason as in
+        claim_for_extraction: the ORM's onupdate fires on ORM flushes,
+        not on a Core UPDATE.
+        """
+        now = datetime.now(UTC)
+
+        statement = (
+            update(CV)
+            .where(
+                CV.user_id == user_id,
+                CV.id != keep_cv_id,
+                CV.superseded_at.is_(None),
+            )
+            .values(superseded_at=now, updated_at=now)
+        )
+
+        result = await self._session.execute(statement)
+        return result.rowcount
+
+    async def version_by_id(self, version_id: int) -> CVVersion | None:
+        """Load one CVVersion by primary key.
+
+        /profile needs the extracted_profile JSON that
+        profiles.active_cv_version_id points at, because that JSON
+        holds the model's original skill spellings. profiles.skills
+        holds normalized matching keys and reads badly to a human
+        ('cpp', 'dotnet') — see the doc= on Profile.skills.
+        """
+        result = await self._session.execute(
+            select(CVVersion).where(CVVersion.id == version_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def latest_id_for_user(self, user_id: int) -> int | None:
+        """The id of the user's newest CV, without loading the row.
+
+        extract_cv's third phase uses this to check it is still the
+        latest before writing profile fields. Selecting the id alone
+        keeps that check cheap, since it runs on every extraction and
+        almost always passes.
+        """
+        result = await self._session.execute(
+            select(CV.id)
+            .where(CV.user_id == user_id)
+            .order_by(CV.created_at.desc(), CV.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()

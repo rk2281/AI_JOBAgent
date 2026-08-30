@@ -15,13 +15,15 @@ from telegram.ext import (
     filters,
 )
 
-from app.bot.handlers import common, onboarding
+from app.bot.handlers import common, onboarding, profile
 
 
 def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", onboarding.start_command))
     application.add_handler(CommandHandler("status", onboarding.status_command))
     application.add_handler(CommandHandler("restart", onboarding.restart_command))
+    application.add_handler(CommandHandler("profile", profile.profile_command))
+    application.add_handler(CommandHandler("update_cv", profile.update_cv_command))
     application.add_handler(CommandHandler("help", common.help_command))
     application.add_handler(CommandHandler("ping", common.ping_command))
 

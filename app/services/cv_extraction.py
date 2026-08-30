@@ -67,6 +67,7 @@ from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.skill import SkillRepository, normalize_skill_names
 from app.db.session import session_scope
 from app.integrations.gemini import GeminiClient, GeminiExtractionError
+from app.schemas.cv_profile import CVProfile
 from app.services.cv_text import extract_raw_text
 from app.services.experience import compute_total_experience_years
 
@@ -174,6 +175,46 @@ async def extract_cv(
             extraction_model=client.model,
         )
 
+        # Two reasons to keep the version row but not touch the
+        # profile. Both leave a user better off than the alternative.
+        if _is_empty_extraction(profile_data):
+            # A parse that succeeded and said nothing. Day 4 wrote
+            # status=complete here and overwrote the profile with the
+            # emptiness, which is how a good profile could vanish
+            # while every log line said success. The version row still
+            # gets written above, so the bad extraction is auditable —
+            # only the profile is spared.
+            cv.extraction_status = ExtractionStatus.EMPTY.value
+            cv.extracted_at = datetime.now(UTC)
+            logger.warning(
+                "Extraction for cv_id=%s parsed but was empty; "
+                "profile left unchanged",
+                cv_id,
+            )
+            return ExtractionResult(
+                status=ExtractionStatus.EMPTY,
+                error="Extraction produced no skills, experience or summary",
+            )
+
+        latest_id = await cv_repo.latest_id_for_user(user_id)
+        if latest_id is not None and latest_id != cv_id:
+            # The user uploaded a newer CV while this one was with
+            # Gemini. The claim in phase 1 protects one CV from two
+            # extractions; it says nothing about two CVs racing for
+            # one profile row. Without this check the winner is
+            # whichever Gemini call returned last, which may well be
+            # the older file.
+            cv.extraction_status = ExtractionStatus.COMPLETE.value
+            cv.extracted_at = datetime.now(UTC)
+            logger.info(
+                "cv_id=%s finished but user_id=%s has newer cv_id=%s; "
+                "profile not updated",
+                cv_id,
+                user_id,
+                latest_id,
+            )
+            return ExtractionResult(status=ExtractionStatus.SUPERSEDED)
+
         profile = await ProfileRepository(session).get_or_create(user_id)
         profile.summary = profile_data.summary
 
@@ -206,6 +247,8 @@ async def extract_cv(
             # The catalog gets the original spelling; Skill.name is the
             # human-readable form and get_or_create normalizes it itself.
             await skill_repo.get_or_create(skill_name)
+
+        await cv_repo.mark_others_superseded(user_id=user_id, keep_cv_id=cv_id)
 
         cv.extraction_status = ExtractionStatus.COMPLETE.value
         cv.extracted_at = datetime.now(UTC)
@@ -256,3 +299,26 @@ async def _finish_no_text(cv_id: int) -> ExtractionResult:
 
     logger.info("No text layer for cv_id=%s", cv_id)
     return ExtractionResult(status=ExtractionStatus.NO_TEXT_LAYER)
+
+
+def _is_empty_extraction(profile_data: CVProfile) -> bool:
+    """Whether a successfully-parsed extraction actually said anything.
+
+    The check that Day 4 lacked. Gemini can return a well-formed
+    response matching the schema in which every array is empty and
+    every string is null — most often when the response schema was
+    built without a `required` list, but also on a CV whose layout
+    defeats it. Nothing raises. status=complete gets written. The
+    profile is overwritten with nothing.
+
+    target_roles is excluded on purpose. It is inferred rather than
+    read off the page, so a response carrying only target_roles has
+    guessed rather than extracted, and treating that as a usable
+    profile would defeat the point of this function.
+    """
+    return not (
+        (profile_data.summary or "").strip()
+        or profile_data.skills
+        or profile_data.experience
+        or profile_data.education
+    )

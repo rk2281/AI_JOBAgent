@@ -17,6 +17,8 @@ HELP_TEXT = (
     "*Commands*\n"
     "/start — begin or resume setup\n"
     "/status — see what I have on file\n"
+    "/profile — see what I understood from your CV\n"
+    "/update_cv — replace your CV\n"
     "/restart — redo setup from the beginning\n"
     "/help — this message\n"
     "/ping — check I'm alive\n\n"

@@ -46,6 +46,27 @@ class ExtractionStatus(str, enum.Enum):
     # candidate — see docs/CODEBASE_GUIDE.md.
     NO_TEXT_LAYER = "no_text_layer"
 
+    # Gemini answered successfully and the response parsed, but it
+    # carried no skills, no experience, no education and no summary.
+    #
+    # Deliberately not COMPLETE: Day 4 marked exactly this case
+    # complete, and a profile that had silently become empty was
+    # indistinguishable from one that was genuinely thin. Deliberately
+    # not FAILED either: nothing broke, no exception was raised, and a
+    # retry with a better prompt may well succeed, which is not true
+    # of FAILED's usual causes.
+    EMPTY = "empty"
+
+    # Never written to the extraction_status column. It exists only as
+    # a return value from extract_cv, meaning "this extraction
+    # finished correctly but a newer CV has since arrived, so the
+    # profile was left for that one to write".
+    #
+    # A returned-only member is unusual enough to be worth stating: the
+    # alternative was a separate result enum, which would have made
+    # every caller switch on two types to answer one question.
+    SUPERSEDED = "superseded"
+
 
 class CV(Base, TimestampMixin):
     """A CV file uploaded through Telegram."""
@@ -77,6 +98,21 @@ class CV(Base, TimestampMixin):
     )
     extraction_error: Mapped[str | None] = mapped_column(Text)
     extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        doc=(
+            "Set when the user uploaded a newer CV. NULL means this is "
+            "the live one.\n\n"
+            "Exists because replacing a CV creates a new cvs row and "
+            "leaves the old one behind, often stuck at "
+            "extraction_status='pending' forever because "
+            "latest_for_user only ever returns the newest. Without "
+            "this column that row reads as a bug. With it, the row is "
+            "explained: nothing will ever process it because the user "
+            "moved on."
+        ),
+    )
 
     user: Mapped[User] = relationship(back_populates="cvs")
 

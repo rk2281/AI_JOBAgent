@@ -18,7 +18,9 @@ from __future__ import annotations
 import pytest
 
 from app.db.repositories.skill import normalize_skill_name, normalize_skill_names
+from app.integrations.gemini import GeminiClient
 from app.schemas.cv_profile import CVProfile, EducationEntry, ExperienceEntry
+from app.services.cv_extraction import _is_empty_extraction
 from app.services.cv_text import UnsupportedCVFormat, extract_raw_text
 
 # -- CVProfile schema -------------------------------------------------------
@@ -204,3 +206,48 @@ def test_normalize_skill_names_applies_punctuation_aliases() -> None:
 def test_normalize_skill_names_drops_blank_entries() -> None:
     """Proves whitespace-only entries don't survive as an empty-string key."""
     assert normalize_skill_names(["Python", "", "   "]) == ["python"]
+
+
+# -- _is_empty_extraction ------------------------------------------------
+
+
+def test_empty_extraction_detected_for_bare_profile() -> None:
+    assert _is_empty_extraction(CVProfile()) is True
+
+
+def test_empty_extraction_detected_when_only_target_roles() -> None:
+    """target_roles is inferred, not extracted, so it doesn't count as content."""
+    assert _is_empty_extraction(CVProfile(target_roles=["MLE"])) is True
+
+
+def test_extraction_not_empty_with_one_skill() -> None:
+    assert _is_empty_extraction(CVProfile(skills=["Python"])) is False
+
+
+def test_extraction_not_empty_with_whitespace_summary_only() -> None:
+    """Whitespace is not content."""
+    assert _is_empty_extraction(CVProfile(summary="   ")) is True
+
+
+def test_extraction_not_empty_with_real_summary() -> None:
+    assert _is_empty_extraction(CVProfile(summary="ML engineer")) is False
+
+
+# -- GeminiClient timeout ------------------------------------------------
+
+
+def test_timeout_seconds_converted_to_milliseconds_on_http_options() -> None:
+    """HttpOptions.timeout is milliseconds, confirmed against the
+    installed google-genai package (its docstring says so, and
+    _api_client.get_timeout_in_seconds() divides it by 1000.0 before
+    handing it to httpx). The timeout= kwarg on interactions.create()
+    is silently ignored by the SDK, so HttpOptions at client
+    construction is the only place this can actually be checked.
+
+    No network call: constructing a genai.Client only builds the SDK's
+    internal HTTP client, it does not make a request.
+    """
+    client = GeminiClient(api_key="test-key", timeout_seconds=30.0)
+
+    http_options = client._client._api_client._http_options
+    assert http_options.timeout == 30_000
