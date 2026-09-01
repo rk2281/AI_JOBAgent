@@ -80,28 +80,39 @@ class EmbeddingResponseError(EmbeddingError):
 def describe_genai_error(error: Exception) -> str:
     """Describe a provider error without formatting the error object.
 
-    Reads only `code` and `message`. Mirrors _format_errors() in
-    gemini.py and describe_http_error() in http_errors.py, and exists
-    for the same reason: an exception's string form can carry the
-    request that produced it, and on this path the request is job text
-    or a candidate's CV. An error is not safe to format just because
-    it is an error.
+    Returns ONLY the exception's class name and, where the error
+    exposes one, an HTTP status code -- for example
+    "RateLimitError (HTTP 429)". Nothing from the response body ever
+    appears in the result, and that used to not be true: this
+    function previously also read `.message`, and on this SDK that
+    attribute is not a short reason string but the provider's own
+    formatted error text, body included --
+    `Error code: 429 - {'error': {'message': ...}}` was observed
+    written into skills_extraction_error verbatim.
+
+    A provider error's string form can carry the request that
+    produced it, and on the enrichment path that request is job text;
+    on the embedding path it is a candidate's CV. The class name and
+    the status code are enough for a caller to decide what to do --
+    retry, stop, or surface to a human -- and the body never is, so it
+    is never read.
+
+    Mirrors _format_errors() in gemini.py and describe_http_error() in
+    http_errors.py in spirit, though those still read a `message`
+    field; this function does not, because on this SDK that field is
+    exactly the unsafe part.
 
     scripts/embedding_isolate.py carries an identical copy on purpose.
     That script has to run before this module exists to be trusted,
     which is the whole point of it, so it cannot import from here.
     """
-    parts = [type(error).__name__]
+    name = type(error).__name__
 
-    code = getattr(error, "code", None)
-    if code is not None:
-        parts.append(f"code={code}")
+    status = getattr(error, "code", None)
+    if isinstance(status, int):
+        return f"{name} (HTTP {status})"
 
-    message = getattr(error, "message", None)
-    if isinstance(message, str) and message:
-        parts.append(message)
-
-    return " | ".join(parts)
+    return name
 
 
 def is_quota_error(error: Exception) -> bool:

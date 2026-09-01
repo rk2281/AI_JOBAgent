@@ -10,12 +10,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models.embedding import EmbeddingRun, EmbeddingStatus
 from app.db.models.ingestion import IngestionReject, IngestionRun, IngestionStatus
-from app.db.models.job import Job
+from app.db.models.job import Job, JobSkill
 
 
 class JobRepository:
@@ -360,6 +361,189 @@ class JobRepository:
             text(f"EXPLAIN ANALYZE {compiled}")
         )
         return [row[0] for row in result.all()]
+
+    # --- job enrichment (Day 8) ---------------------------------------------
+    #
+    # Same `is_active = True` scoping rule as the embedding methods
+    # above, and for the same reason: if candidates were selected
+    # from active rows but the leftover count were taken over every
+    # row, `remaining` could never reach 0 and a healthy run would
+    # look permanently broken.
+    #
+    # `is_excluded` is deliberately NOT filtered here. An excluded
+    # job is skipped by SCORING, which is a different question from
+    # whether it has skills. Filtering it at this layer would make
+    # the enrichment counts disagree with the job counts for a
+    # reason nothing states.
+
+    async def count_active_missing_skills(self) -> int:
+        """Active rows with no job_skills and no attempt recorded.
+
+        The enrichment equivalent of count_active_missing_embedding,
+        with one important difference. A NULL embedding makes a row
+        INVISIBLE to every similarity query. Missing skills do not:
+        the row still ranks, it just abstains on the 30% signal. So
+        this number is not "rows that vanished", it is "rows scoring
+        on 70% of the model", which is worse in a subtler way --
+        those jobs are still ranked, and ranked against jobs that had
+        the full 100%.
+        """
+        # Uses NOT EXISTS against job_skills rather than an outer
+        # join with a NULL test. Both are correct; NOT EXISTS says
+        # what is meant and stops at the first matching row.
+        has_skills = select(JobSkill.job_id).where(JobSkill.job_id == Job.id).exists()
+
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.is_active.is_(True),
+                Job.skills_extraction_attempts == 0,
+                ~has_skills,
+            )
+        )
+        return int(result.scalar_one())
+
+    async def list_needing_enrichment(
+        self,
+        limit: int,
+        retry_failed: bool = False,
+    ) -> list[Job]:
+        """Active rows that have no skills and are still worth trying.
+
+        Eligibility is: active, no job_skills rows, and
+        skills_extraction_attempts < settings.enrichment_max_attempts.
+
+        That attempts test is the one thing here that deliberately
+        differs from the embedding pass, which filters on
+        `attempts == 0`. That was right there because those failures
+        were deterministic -- a dimension mismatch fails identically
+        every time, so one attempt is all the information available.
+
+        Here the failure is variance. Fifteen timed calls during
+        isolation ran from 7.4s to 74.1s for requests that never
+        changed, against a 90s ceiling. A row that times out is very
+        often merely unlucky, and a binary filter would drop it from
+        every future run permanently for being slow once.
+
+        `retry_failed=True` ignores the attempts ceiling entirely,
+        for the case where the failure was the provider's rather than
+        the row's.
+
+        Ordered by id, oldest first, so an interrupted run resumes
+        predictably rather than reshuffling which rows are left.
+        """
+        has_skills = select(JobSkill.job_id).where(JobSkill.job_id == Job.id).exists()
+
+        query = select(Job).where(Job.is_active.is_(True), ~has_skills)
+        if not retry_failed:
+            query = query.where(
+                Job.skills_extraction_attempts < settings.enrichment_max_attempts
+            )
+
+        result = await self._session.execute(query.order_by(Job.id).limit(limit))
+        return list(result.scalars().all())
+
+    async def set_enrichment(
+        self,
+        job_id: int,
+        *,
+        model: str,
+        source_hash: str,
+        min_experience_years: int | None,
+        max_experience_years: int | None,
+        work_mode: str | None,
+        extracted_at: datetime,
+    ) -> None:
+        """Record a successful extraction on the jobs row.
+
+        Does NOT write job_skills -- replace_job_skills does that,
+        because it needs the skills catalog and this method must not
+        reach into a second repository.
+
+        `skills_extraction_error` is cleared on success, for the same
+        reason set_embedding clears embedding_error: a row that
+        failed once and then succeeded must not keep a stale message,
+        or a later reader concludes the current data is suspect.
+
+        min_experience_years and max_experience_years are written
+        even when both are None. That is not a no-op: None here means
+        the posting was SILENT about experience, which is what the
+        experience signal must abstain on, and it is different from 0,
+        which means the posting explicitly welcomes freshers. Writing
+        them explicitly keeps that distinction in the column rather
+        than in an assumption about what an unwritten column means.
+        """
+        await self._session.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(
+                skills_extraction_model=model,
+                skills_source_hash=source_hash,
+                min_experience_years=min_experience_years,
+                max_experience_years=max_experience_years,
+                work_mode=work_mode,
+                skills_extracted_at=extracted_at,
+                skills_extraction_error=None,
+                skills_extraction_attempts=Job.skills_extraction_attempts + 1,
+            )
+        )
+
+    async def mark_enrichment_failed(self, job_id: int, error: str) -> None:
+        """Record a failed attempt without touching anything else.
+
+        Existing job_skills rows are left alone, exactly as
+        mark_embedding_failed leaves a stale vector alone: a re-run
+        that fails must not destroy working older data. Stale skills
+        still let a job score on 100% of the model; no skills makes
+        it abstain on 30%.
+
+        `error` must come from a describe_*_error() helper. Never
+        str(exc) -- a google-genai error can echo back the request,
+        and on this path the request is job text.
+        """
+        await self._session.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(
+                skills_extraction_error=error,
+                skills_extraction_attempts=Job.skills_extraction_attempts + 1,
+            )
+        )
+
+    async def replace_job_skills(
+        self,
+        job_id: int,
+        skill_ids: list[int],
+    ) -> int:
+        """Set a job's skills to exactly this set. Returns rows written.
+
+        Delete-then-insert rather than an upsert, because this is a
+        REPLACEMENT: a re-run that finds fewer skills must remove the
+        ones no longer found, and an upsert would only ever grow the
+        set. A job whose skills only accumulate would drift towards a
+        larger denominator over time, quietly lowering every
+        candidate's skill score.
+
+        Takes skill_ids, not names. Resolving a name to a catalog row
+        is SkillRepository.get_or_create's job, and doing it here
+        would put two repositories' SQL in one method.
+
+        Returns the number of rows inserted so the caller can compare
+        it against the number of skills it asked for. A silent
+        difference between those two is exactly the kind of thing
+        that shows up later as scores that feel slightly wrong.
+        """
+        await self._session.execute(delete(JobSkill).where(JobSkill.job_id == job_id))
+
+        if not skill_ids:
+            return 0
+
+        self._session.add_all(
+            [JobSkill(job_id=job_id, skill_id=skill_id) for skill_id in skill_ids]
+        )
+        await self._session.flush()
+        return len(skill_ids)
 
 
 class IngestionRunRepository:

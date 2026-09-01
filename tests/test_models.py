@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "ingestion_runs",
     "ingestion_rejects",
     "embedding_runs",
+    "scoring_runs",
     "recommendations",
     "notifications",
     "user_feedback",
@@ -54,6 +55,38 @@ def test_recommendation_stores_individual_signal_scores() -> None:
         "final_score",
     ):
         assert signal in columns
+
+
+def test_recommendation_signal_scores_are_nullable() -> None:
+    """A missing signal must be storable as NULL, not as 0.0.
+
+    The whole abstain rule rests on this. When a job has no
+    extractable skills, the skill signal scores NULL and its 30% is
+    removed from the denominator; scoring it 0.0 instead would rank
+    every non-tech job below every tech job for a reason that is a
+    data gap, not a fit gap.
+
+    NULL means "could not look". 0.0 means "looked, no match". If
+    these columns are ever made NOT NULL, that distinction collapses
+    into a single number and nothing anywhere would report it -- the
+    scores would still compute, still rank, and still be wrong. This
+    test is the only thing standing between those two states.
+    """
+    columns = Base.metadata.tables["recommendations"].c
+
+    for signal in (
+        "semantic_score",
+        "skill_score",
+        "experience_score",
+        "location_score",
+        "title_score",
+    ):
+        assert columns[signal].nullable, f"{signal} must stay nullable"
+
+    # final_score is deliberately NOT in that list. A pair either has
+    # a total or was not scored at all; there is no "abstained
+    # overall".
+    assert not columns["final_score"].nullable
 
 
 def test_user_dependents_cascade_on_delete() -> None:

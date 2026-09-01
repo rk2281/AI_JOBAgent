@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -197,12 +198,342 @@ class Settings(BaseSettings):
     # exists.
     embed_after_ingestion: bool = False
 
+    # --- Matching & scoring (Day 8) -----------------------------------------
+    #
+    # The five weights come from the plan spreadsheet's "Matching &
+    # Scoring" tab, which is authoritative. They sum to exactly 1.0
+    # in binary floating point as written -- verified, not assumed --
+    # but the validator below stays because these are meant to be
+    # re-tuned and an edited set will not be so lucky.
+    weight_skill: float = 0.30
+    weight_semantic: float = 0.20
+    weight_experience: float = 0.20
+    weight_location: float = 0.15
+    weight_title: float = 0.15
+
+    # Bumped by hand whenever any weight above changes.
+    #
+    # Exists from the first run rather than being added later. A
+    # stored score whose weights are unknown cannot be compared with
+    # a score computed today, and recommendations is a stored table
+    # -- so retro-fitting this would leave every early row with
+    # unknowable provenance. Re-tuning the weights is written into
+    # the Recommendation docstring as a goal, which makes this a
+    # certainty rather than a possibility.
+    weights_version: int = 1
+
+    # Raw cosine similarity is rescaled onto 0-1 by an affine map
+    # against these two FIXED anchors, not by min-max within the
+    # day's candidate set.
+    #
+    # Candidate-set rescaling was rejected for a reason that is not
+    # the obvious one. The obvious objection is that the best match
+    # always scores 1.0 even when it is terrible. The stronger
+    # objection is that recommendations is a STORED table: a score
+    # computed relative to that day's neighbours can never be
+    # reproduced, because it was never a property of the pair. It
+    # was a property of the batch. That is the same defect that made
+    # JobMatch frozen.
+    #
+    # Why rescaling is needed at all: two English documents in the
+    # same domain have a high similarity floor. Measured over one
+    # AI/ML CV against all 99 stored jobs, raw similarity ran from
+    # 0.5058 to 0.6928 -- a spread of 0.187, with 49 of 98 jobs
+    # between 0.59 and 0.65. Fed straight into a 20% weight that is
+    # a spread of 3.74 points out of 20, so a 20% signal would
+    # behave like roughly 4%. The ordering was correct; only the
+    # range was useless.
+    #
+    # With these anchors that same data spans 0.58 to 19.28 points
+    # out of 20.
+    semantic_anchor_low: float = 0.50
+    semantic_anchor_high: float = 0.70
+
+    # A raw similarity of exactly semantic_anchor_high maps to 1.0
+    # WITHOUT being clamped -- (0.70-0.50)/(0.70-0.50) is 1.0 by
+    # arithmetic. So the clamp counters in scoring_runs must count
+    # `raw > high` and `raw < low`, strictly, never >= or <=.
+    # Counting the exact boundary as a clamp would report a loss of
+    # discrimination that did not happen. Same rule as
+    # fit_to_budget(), which truncates on `len(text) > max_chars`
+    # because a document of exactly max_chars fits.
+    #
+    # anchor_high sits 0.0072 above the highest similarity ever
+    # observed, so nothing clamps today. It is kept tight on purpose:
+    # widening it to buy headroom would compress every real score
+    # now, to protect against a case that has never occurred. The
+    # clamp counters are what will say when that changes.
+
+    # Applied to RAW similarity, never to the rescaled score. An
+    # absolute floor is what stops a day on which only irrelevant
+    # jobs were ingested from producing a confident-looking top
+    # match. Of the 99 stored jobs only 12 clear this, and those 12
+    # include all three genuine ML matches.
+    #
+    # Compared with >=. A job at exactly 0.62 CLEARS the floor.
+    # Day 6's `median < 500` check stayed silent when the median was
+    # exactly 500; the boundary is the case that fails while looking
+    # like it should pass, so it gets stated here and tested at
+    # exactly this value rather than near it.
+    semantic_notify_floor: float = 0.62
+
+    # A signal with no data on one side ABSTAINS: its score is NULL
+    # and its weight is removed from the denominator, rather than
+    # scoring 0.0 and dragging the total down for a data gap. But a
+    # score built from 35% of the weight is not comparable with one
+    # built from 100%, so notification requires a minimum coverage.
+    #
+    # This also protects user_preferences.notification_threshold,
+    # which defaults to 0.7. On a renormalised score, 0.7 is easy to
+    # reach with two signals and hard with five -- without a floor,
+    # that threshold quietly means something different for every job.
+    #
+    # Compared with >=. Coverage of exactly 0.55 qualifies.
+    min_weight_covered_to_notify: float = 0.55
+
+    # Experience taper. A job wanting [lo, hi] years scores a
+    # candidate holding x years as:
+    #
+    #   lo <= x <= hi          -> 1.0
+    #   x > hi                 -> 1.0   overqualified is not a
+    #                                   mismatch; that is the user's
+    #                                   call to make, not ours
+    #   x < lo                 -> max(0.0, 1.0 - (lo - x) / TAPER)
+    #
+    # A taper rather than a cliff because "two years wanted, one and
+    # a half held" and "two years wanted, none held" must not be the
+    # same number. At TAPER = 3.0 those are 0.83 and 0.33.
+    #
+    # x == lo and x == hi both score exactly 1.0. Tests are written
+    # at exactly lo and exactly hi, not at lo - 0.1.
+    #
+    # A NULL hi with lo present ("5+ years") is treated as infinity,
+    # not as an abstain -- an open-ended range is information.
+    experience_taper_years: float = 3.0
+
+    # Quality penalties. Applied as a MULTIPLIER on the weighted
+    # total, not as a sixth weighted signal.
+    #
+    # A signal answers "does this person fit this job". These answer
+    # "is this posting trustworthy", which is a different axis --
+    # a staffing agency's listing is not a worse fit, it is a less
+    # reliable description of one. Folding it into the weights makes
+    # it impossible to explain to a user why their score moved.
+    #
+    # Multiplier rather than subtraction so the result can never go
+    # negative, and stored separately from the weighted total so
+    # both can be read on their own.
+    #
+    # Penalties, NOT filters. Four companies account for 29 of the
+    # 99 active jobs; filtering them removes nearly a third of the
+    # corpus, and some agency postings are real. A filtered job is
+    # not ranked low, it is absent -- and absent is the failure mode
+    # this project keeps paying for.
+    quality_multiplier_agency: float = 0.90
+    quality_multiplier_no_city: float = 0.95
+
+    # Comma-separated, matched case-insensitively against a
+    # normalized company string, by EXACT equality -- not substring.
+    #
+    # Substring matching would fire "meta" against "Metadata
+    # Solutions Pvt Ltd" and apply a penalty to the wrong job with
+    # nothing anywhere reporting it. Exact matching instead misses
+    # variants like "Vrinda International Pvt Ltd" -- but that miss
+    # shows up as a lower quality_penalty_agency count in
+    # scoring_runs, where someone can see it. A loud miss beats a
+    # silent false positive.
+    #
+    # Seeded from the live table on Day 8:
+    #   Vrinda International  11    Weekday AI  8
+    #   TestHiring             6    JobCrexa    4
+    #
+    # TestHiring is included although it is not a staffing agency.
+    # The test this list applies is not "is this a recruiter" but
+    # "is this the employer that has the work", and a name that is
+    # plainly test or aggregator data fails it the same way.
+    #
+    # In settings rather than in Python because a hardcoded list
+    # inside scoring logic is a data table wearing a code costume,
+    # and it goes stale the first time ingestion finds a fifth one.
+    staffing_agency_companies: str = (
+        "vrinda international,weekday ai,jobcrexa,testhiring"
+    )
+
+    # Title tokens that appear in almost every posting and therefore
+    # carry no matching signal. Scoring runs on what is left.
+    #
+    # If BOTH sides reduce to nothing after these are removed, the
+    # title signal ABSTAINS rather than scoring 0.0. "Senior
+    # Engineer" against "Lead Developer" tells us nothing in either
+    # direction, and a 0.0 there would punish a job for having a
+    # generic title.
+    title_weak_tokens: str = (
+        "engineer,developer,senior,junior,lead,principal,staff,"
+        "associate,manager,executive,specialist,consultant,analyst,"
+        "sr,jr,i,ii,iii,intern,trainee,officer,head,chief"
+    )
+
+    # --- Job enrichment (Day 8, Part 2) -------------------------------------
+    # Seconds between generation calls during the enrichment pass.
+    #
+    # Day 7 found the embedding quota is per MINUTE, not per day, at
+    # roughly ten requests. The generation quota for gemini_model is
+    # a DIFFERENT quota and its ceiling is unknown. 7.0 is carried
+    # over on the assumption that the shape is the same, for the same
+    # reason 7.0 was chosen there: at ten per minute, 6.0 seconds is
+    # EXACTLY the limit, and a threshold sitting on its boundary is
+    # the one that fails while looking like it should pass.
+    #
+    # Cost at 99 jobs: roughly 26 minutes end to end. That number is
+    # printed by scripts/enrich_jobs.py --dry-run so that a slow run
+    # is not mistaken for a hung one -- Day 5 lost three hours to a
+    # Gemini call that hung rather than failing.
+    enrichment_seconds_between_calls: float = 7.0
+
+    # Per-call timeout for enrichment. 90 seconds, from measurement.
+    #
+    # Twelve timed calls across four isolate runs spanned 7.4s to
+    # over 45s, and the request is NOT what drives the spread: the
+    # smallest call in the set -- a four-word prompt with no schema --
+    # was consistently among the SLOWEST at 29.2, 37.9, 37.8 and
+    # 38.5 seconds, while a longer call with the full schema returned
+    # in 7.4s. A 45s ceiling sat inside that range and produced one
+    # timeout on a request that had already succeeded twice with
+    # identical text.
+    #
+    # That matters more here than in a diagnostic. On this path a
+    # timeout increments skills_extraction_attempts, which removes
+    # the row from list_needing_extraction()'s default filter -- so a
+    # job that was merely slow stops being retried, permanently and
+    # silently.
+    #
+    # 90 is twice the largest value observed. Same shape of reasoning
+    # as the 7.0 second pacing over 6.0: a threshold sitting on its
+    # observed boundary is the one that fails while looking like it
+    # should pass.
+    enrichment_timeout_seconds: float = 90.0
+
+    # How many times a job may be attempted before it is left alone.
+    #
+    # NOT the binary `attempts == 0` filter the embedding pass uses.
+    # That was right there because those failures were deterministic:
+    # a dimension mismatch or an empty document fails identically
+    # every time, so one attempt is all the information there is.
+    #
+    # Here the failure is VARIANCE. Fifteen timed calls across five
+    # isolate runs ran from 7.4s to 74.1s for requests that did not
+    # change, against a 90s ceiling. A row that times out at 91s is
+    # not broken, it is slow -- and a binary filter would remove it
+    # from every future run permanently, for being unlucky once.
+    #
+    # Three attempts gives a slow row three chances and still stops a
+    # genuinely broken one. skills_extraction_error records which
+    # kind each failure was, so a row stuck at 3 can be read as
+    # "timed out three times" or "rejected three times" rather than
+    # just "failed".
+    enrichment_max_attempts: int = 3
+
+    # Comma-separated. Entries a model returns as "skills" that are
+    # personal qualities rather than named competencies.
+    #
+    # This is not tidiness. Skill score is
+    # |job skills AND candidate skills| / |job skills|, so anything
+    # in that denominator which no CV will ever list silently lowers
+    # every good candidate's 30% signal. A live call returned
+    # "Strong communication skills" alongside seven real
+    # technologies: eight in the denominator instead of seven, and a
+    # candidate holding five of them scores 0.625 instead of 0.714,
+    # for a reason nothing anywhere reports.
+    #
+    # Matched as a SUBSTRING of the normalized skill, unlike the
+    # agency list which is matched by exact equality. Different
+    # reasoning: a company name is a fixed string, while these arrive
+    # wrapped in wording the model chose -- "strong communication
+    # skills", "excellent communication". The false-positive risk is
+    # real and accepted, and the count of what was dropped is
+    # recorded so it can be inspected.
+    enrichment_soft_skill_terms: str = (
+        "communication,teamwork,team player,leadership,interpersonal,"
+        "problem solving,problem-solving,collaboration,collaborative,"
+        "time management,attention to detail,work ethic,adaptability,"
+        "self-motivated,self motivated,fast learner,detail oriented,"
+        "detail-oriented,multitasking,proactive"
+    )
+
+    # Whole-word triggers for work_mode inference. Deterministic and
+    # in our code, not asked of the model -- the same reasoning as
+    # compute_total_experience_years(): a rule can be re-run,
+    # unit-tested, and explained to a user who asks why.
+    enrichment_remote_terms: str = "remote,work from home,wfh"
+    enrichment_hybrid_terms: str = "hybrid"
+
+    # There is deliberately NO enrichment batch size.
+    #
+    # Day 7 batched embeddings eight at a time and the obvious move
+    # is to do the same here: 13 calls instead of 99. It is the wrong
+    # move, and the reason is what gemini-embedding-2 did -- it
+    # returned ONE vector for a batch of eight inputs, and code
+    # zipping that back positionally would have attached one
+    # embedding to the first row and silently lost seven.
+    #
+    # That failure was CATCHABLE, because a returned count can be
+    # compared against an input count. The generation equivalent is
+    # not. A model returning six objects for eight descriptions, or
+    # eight objects in a different order, produces output that parses
+    # cleanly and stores job 3's skills against job 5. No dimension
+    # check, no length assert, nothing to notice it -- and the damage
+    # shows up only as rankings that feel slightly wrong.
+    #
+    # One job, one call. The job_id travels in the prompt and comes
+    # back in the response, and it is compared against the row's own
+    # id before anything is written.
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def _check_weights_sum_to_one(self) -> "Settings":
+        """Fail at import if the five scoring weights do not sum to 1.
+
+        An explicit raise rather than `assert`, because assert
+        statements are stripped under `python -O` -- and a check that
+        disappears in one run mode is worse than no check, since it
+        teaches you to trust something that is not always there.
+
+        The comparison is `> EPSILON`, so a total off by exactly
+        EPSILON passes. The value is far below any weight anyone
+        would type by hand; it exists to absorb binary floating point
+        representation, not to permit sloppy weights.
+
+        Why this is fatal rather than a warning: with weights summing
+        to, say, 0.95, every score in the system is quietly 5% low.
+        Nothing is out of range, nothing looks broken, and the
+        ranking is even still correct -- only the absolute numbers
+        are wrong, which is exactly what the notification threshold
+        reads.
+        """
+        EPSILON = 1e-9
+
+        total = (
+            self.weight_skill
+            + self.weight_semantic
+            + self.weight_experience
+            + self.weight_location
+            + self.weight_title
+        )
+
+        if abs(total - 1.0) > EPSILON:
+            raise ValueError(
+                "Day 8 scoring weights must sum to 1.0; "
+                f"they sum to {total!r}. Adjust the weight_* settings "
+                "and bump weights_version."
+            )
+
+        return self
 
     @property
     def max_cv_size_bytes(self) -> int:
@@ -229,6 +560,62 @@ class Settings(BaseSettings):
         parsed = [item.strip() for item in self.adzuna_query_locations.split(",")]
         parsed = [item for item in parsed if item]
         return parsed or [""]
+
+    @property
+    def staffing_agency_list(self) -> frozenset[str]:
+        """Agency names as a lookup set of normalized keys.
+
+        A frozenset rather than a list: this is consulted once per
+        scored pair, and membership on a list is a scan. At 99 jobs
+        that is irrelevant and at 99,000 it is not.
+
+        Stored as a comma-separated string rather than list[str] for
+        the same reason as adzuna_keyword_list -- pydantic-settings
+        parses a list-typed field from the environment as JSON, so
+        an ordinary comma-separated value raises a parse error at
+        import time instead of doing the obvious thing.
+
+        Unlike adzuna_keyword_list, an EMPTY value here means no
+        penalty rather than no filter. That is the safe direction:
+        an empty list scores every posting at full quality, which is
+        wrong in a way scoring_runs.quality_penalty_agency reports
+        as 0 on a corpus known to contain 29.
+        """
+        parsed = [item.strip().lower() for item in
+                  self.staffing_agency_companies.split(",")]
+        return frozenset(item for item in parsed if item)
+
+    @property
+    def title_weak_token_set(self) -> frozenset[str]:
+        """Weak title tokens as a lookup set. See staffing_agency_list."""
+        parsed = [item.strip().lower() for item in
+                  self.title_weak_tokens.split(",")]
+        return frozenset(item for item in parsed if item)
+
+    @property
+    def soft_skill_term_list(self) -> tuple[str, ...]:
+        """Soft-skill substrings, lowercased. See staffing_agency_list.
+
+        A tuple rather than a frozenset because these are matched by
+        substring in a loop, not by membership, so hashing buys
+        nothing and a stable order makes the dropped-term reason
+        reproducible.
+        """
+        parsed = [t.strip().lower() for t in
+                  self.enrichment_soft_skill_terms.split(",")]
+        return tuple(t for t in parsed if t)
+
+    @property
+    def remote_term_list(self) -> tuple[str, ...]:
+        parsed = [t.strip().lower() for t in
+                  self.enrichment_remote_terms.split(",")]
+        return tuple(t for t in parsed if t)
+
+    @property
+    def hybrid_term_list(self) -> tuple[str, ...]:
+        parsed = [t.strip().lower() for t in
+                  self.enrichment_hybrid_terms.split(",")]
+        return tuple(t for t in parsed if t)
 
 
 @lru_cache

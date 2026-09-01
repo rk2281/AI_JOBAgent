@@ -93,11 +93,19 @@ def test_validate_accepts_a_correct_batch() -> None:
     )
 
 
-def test_describe_reports_code_and_message() -> None:
-    error = FakeAPIError(429, "Quota exceeded", f"...key={SECRET}")
+def test_describe_reports_class_and_status_only() -> None:
+    """This test exists because a provider error's string form was
+    written into a database column live on Day 8 --
+    "RateLimitError | Error code: 429 - {'error': ...}". The class and
+    the status are enough to decide what to do; the body never is,
+    and on the enrichment path that body can contain job text.
+    """
+    error = FakeAPIError(429, "secret-job-text-should-not-appear", f"...key={SECRET}")
     described = describe_genai_error(error)
+
+    assert "FakeAPIError" in described
     assert "429" in described
-    assert "Quota exceeded" in described
+    assert "secret-job-text-should-not-appear" not in described
 
 
 def test_describe_never_carries_the_exceptions_string_form() -> None:

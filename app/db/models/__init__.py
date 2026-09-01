@@ -18,6 +18,7 @@ from app.db.models.recommendation import (
     Recommendation,
     UserFeedback,
 )
+from app.db.models.scoring import ScoringRun, ScoringStatus
 from app.db.models.skill import Skill
 from app.db.models.user import OnboardingState, User, UserPreference
 
@@ -39,6 +40,8 @@ __all__ = [
     "OnboardingState",
     "Profile",
     "Recommendation",
+    "ScoringRun",
+    "ScoringStatus",
     "Skill",
     "User",
     "UserFeedback",

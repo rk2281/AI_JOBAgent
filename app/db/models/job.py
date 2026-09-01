@@ -156,6 +156,113 @@ class Job(Base, TimestampMixin):
         ),
     )
 
+    # --- job-skill extraction bookkeeping (Day 8) ---------------------------
+    #
+    # Exactly the same shape and exactly the same reasoning as the
+    # five embedding columns above, because the failure is the same
+    # failure. `job_skills` holding no rows for a job means BOTH
+    # "never extracted" and "extracted, found nothing", and those need
+    # opposite responses: the first is work still to do, the second is
+    # a job that scores an ABSTAIN on the 30% skill signal rather than
+    # a zero.
+    #
+    # Without these, a scoring run over 99 jobs that extracted skills
+    # for none of them looks identical to one where every job was
+    # examined and genuinely lists no recognisable skill.
+
+    skills_extracted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+
+    skills_extraction_model: Mapped[str | None] = mapped_column(
+        String(128),
+        doc=(
+            "Which generation model produced these skills. Recorded "
+            "per row for the same reason as embedding_model: two "
+            "models can populate the same table with results that are "
+            "indistinguishable in the columns and not comparable with "
+            "each other."
+        ),
+    )
+
+    skills_extraction_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+        doc=(
+            "0 with no job_skills rows means never attempted. Above 0 "
+            "with no rows means attempted -- either it failed, or the "
+            "description genuinely named nothing. This is what stops a "
+            "permanently unextractable row from being retried on every "
+            "run, and what stops a never-tried row from being mistaken "
+            "for one."
+        ),
+    )
+
+    skills_extraction_error: Mapped[str | None] = mapped_column(
+        Text,
+        doc=(
+            "Written only from a describe_*_error() helper, never from "
+            "str(exc). A google-genai error can echo back the request, "
+            "and on this path the request is the job description."
+        ),
+    )
+
+    skills_source_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        doc=(
+            "SHA-256 of the text the extractor read, which is "
+            "build_job_document(title, description) -- the SAME "
+            "function the embedding uses.\n\n"
+            "Sharing that function is deliberate: the vector and the "
+            "extracted skills then describe the same job, and the day "
+            "build_job_document() changes, both stored artefacts go "
+            "stale together and both become detectable by comparing "
+            "this against embedding_source_hash's input."
+        ),
+    )
+
+    work_mode: Mapped[str | None] = mapped_column(
+        String(16),
+        doc=(
+            "'remote', 'hybrid' or 'onsite'. NULL means not determined.\n\n"
+            "A separate column rather than reusing is_remote because "
+            "is_remote is a boolean and therefore has no way to say "
+            "'we have not looked'. Today it is False on all 99 rows -- "
+            "not because they are all onsite, but because "
+            "adzuna.py:285 hardcodes False, since Adzuna has no remote "
+            "field. That is the NULL-versus-0.0 problem in a column "
+            "type that cannot express NULL.\n\n"
+            "Three values rather than two booleans: 'remote AND hybrid' "
+            "is not a coherent state, and two booleans would make it "
+            "representable. Hybrid is kept distinct from remote because "
+            "treating them as the same annoys users in both directions."
+        ),
+    )
+
+    is_excluded: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="false",
+        nullable=False,
+        doc=(
+            "Set by hand for postings that are not job postings -- "
+            "currently one row, a recruiter advertising his own "
+            "LinkedIn profile.\n\n"
+            "A boolean and a manual one, not a classifier. Writing a "
+            "junk detector for a single known row means writing "
+            "something whose false positives nobody would ever see. "
+            "An excluded job is still COUNTED, as "
+            "scoring_runs.jobs_excluded_manual -- it is skipped, not "
+            "made invisible."
+        ),
+    )
+
+    exclusion_reason: Mapped[str | None] = mapped_column(
+        Text,
+        doc="Why this row was excluded by hand. Required reading later.",
+    )
+
     job_skills: Mapped[list[JobSkill]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",
