@@ -115,6 +115,70 @@ class Settings(BaseSettings):
     # JobIngestionService._retire_stale_jobs for why it exists.
     job_retire_requires_run_within_days: int = 3
 
+    # --- Embeddings (Day 7) -------------------------------------------------
+    # gemini-embedding-001, chosen by measurement rather than by
+    # documentation. This key also serves gemini-embedding-2 and
+    # gemini-embedding-2-preview, and -2 looked better on the one
+    # number that does not matter (it returns a unit vector at 768
+    # dimensions, which we get anyway by normalising) while failing
+    # the two that do:
+    #
+    #   task_type: -2 ignores it. The same text embedded as
+    #     RETRIEVAL_DOCUMENT and as RETRIEVAL_QUERY came back with
+    #     cosine 1.000000 -- byte-identical. On -001 the same
+    #     comparison gives 0.861247, so the parameter is real. That
+    #     asymmetry is what lets a CV be compared against a job ad
+    #     rather than only against other CVs.
+    #
+    #   batching: -2 returned ONE vector for a batch of eight inputs.
+    #     Not an error -- one vector. Code that zipped that result back
+    #     onto its rows positionally would attach a single embedding to
+    #     the first job and silently lose the other seven. -001 returned
+    #     eight vectors in input order, verified by embedding [X, Y, X]
+    #     and confirming vector 0 and vector 2 are identical.
+    #
+    # Run `python -m scripts.embedding_isolate --model NAME` before
+    # trusting any replacement. Changing this value means re-embedding
+    # every stored row, which is why it is also written to
+    # jobs.embedding_model and cv_versions.embedding_model.
+    gemini_embedding_model: str = "gemini-embedding-001"
+
+    # Must equal the dimension in the vector() columns created by
+    # migration 563b5bb86690. Not a tuning knob: pgvector's HNSW index
+    # does not support more than 2000 dimensions, so the model's native
+    # 3072 output cannot be indexed at all and truncation is mandatory
+    # rather than an optimisation. Changing this needs a migration, an
+    # index rebuild AND a re-embed of every row.
+    embedding_dimension: int = 768
+
+    # Eight verified working end to end. The provider's true ceiling is
+    # unknown and deliberately not probed -- a batch is all-or-nothing,
+    # so a larger batch means a single bad row wastes more work. Raise
+    # it only after `--stage F --batch-size N` confirms the larger size.
+    embedding_batch_size: int = 8
+
+    # Jobs are documents to be searched; a CV is the query searching
+    # them. Passing the same task type for both would waste the one
+    # thing -001 offers over -2.
+    embedding_task_type_document: str = "RETRIEVAL_DOCUMENT"
+    embedding_task_type_query: str = "RETRIEVAL_QUERY"
+
+    # Our own limit, applied before the request is sent. The SDK's
+    # EmbedContentConfig has an `auto_truncate` field whose default
+    # behaviour is unknown, and provider-side truncation is the worst
+    # kind of failure here: the call succeeds, a vector comes back, and
+    # it describes half a CV. Truncating ourselves means we know it
+    # happened and can count it.
+    embedding_max_chars: int = 8000
+
+    # Off by default. Day 6 left `embedding` nullable precisely so that
+    # ingestion never blocks on an API call, and the two passes are
+    # rationed by different quotas -- letting a Gemini failure abort a
+    # run whose Adzuna calls are already spent trades a cheap problem
+    # for an expensive one. Day 10 may turn this on once scheduling
+    # exists.
+    embed_after_ingestion: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

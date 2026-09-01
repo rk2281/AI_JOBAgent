@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
     "job_skills",
     "ingestion_runs",
     "ingestion_rejects",
+    "embedding_runs",
     "recommendations",
     "notifications",
     "user_feedback",

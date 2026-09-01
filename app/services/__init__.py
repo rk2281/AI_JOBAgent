@@ -9,6 +9,12 @@ same logic usable from a web endpoint or a test.
 from app.services.cv_extraction import ExtractionResult, extract_cv
 from app.services.cv_intake import CVIntakeService, CVValidationError
 from app.services.cv_text import UnsupportedCVFormat, extract_raw_text
+from app.services.embedding_text import (
+    build_cv_document,
+    build_job_document,
+    document_hash,
+    fit_to_budget,
+)
 from app.services.job_ingestion import IngestionResult, run_ingestion
 from app.services.locations import normalize_location
 from app.services.onboarding import DocumentOutcome, OnboardingService
@@ -28,8 +34,12 @@ __all__ = [
     "ProfileService",
     "ProfileSnapshot",
     "UnsupportedCVFormat",
+    "build_cv_document",
+    "build_job_document",
+    "document_hash",
     "extract_cv",
     "extract_raw_text",
+    "fit_to_budget",
     "normalize_location",
     "render_profile",
     "run_ingestion",

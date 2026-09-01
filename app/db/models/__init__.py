@@ -7,6 +7,7 @@ this to detect the full schema.
 
 from app.db.base import Base
 from app.db.models.cv import CV, CVVersion, ExtractionStatus
+from app.db.models.embedding import EmbeddingRun, EmbeddingStatus
 from app.db.models.ingestion import IngestionReject, IngestionRun, IngestionStatus
 from app.db.models.job import Job, JobSkill
 from app.db.models.profile import Profile
@@ -24,6 +25,8 @@ __all__ = [
     "Base",
     "CV",
     "CVVersion",
+    "EmbeddingRun",
+    "EmbeddingStatus",
     "ExtractionStatus",
     "FeedbackAction",
     "IngestionReject",

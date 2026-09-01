@@ -96,6 +96,66 @@ class Job(Base, TimestampMixin):
         nullable=True,
     )
 
+    # The five columns below exist because a NULL embedding is
+    # INVISIBLE rather than wrong. `ORDER BY embedding <=> :q` never
+    # returns a NULL row, so a job that failed to embed silently drops
+    # out of every Day 8 query with no error anywhere. NULL alone
+    # cannot tell "not attempted yet" from "attempted and failed", and
+    # those need opposite responses.
+    embedding_model: Mapped[str | None] = mapped_column(
+        String(128),
+        doc=(
+            "Which model produced this vector. Not optional bookkeeping: "
+            "gemini-embedding-001 and gemini-embedding-2 both return 768 "
+            "dimensions, so rows from the two are identical in the column "
+            "and meaningless as neighbours of each other. This is the only "
+            "thing that makes such a mix detectable."
+        ),
+    )
+
+    embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    embedding_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+        doc=(
+            "0 with a NULL embedding means never attempted. Above 0 with "
+            "a NULL embedding means attempted and failed. The distinction "
+            "is what stops a permanently broken row from being retried "
+            "forever, and what stops a never-tried row from being "
+            "mistaken for a broken one."
+        ),
+    )
+
+    embedding_error: Mapped[str | None] = mapped_column(
+        Text,
+        doc=(
+            "Written only from a describe_*_error() helper, never from "
+            "str(exc). Same rule as ingestion_runs.error_message: a "
+            "provider exception's string form can carry the request that "
+            "produced it, and on this path that request is job text."
+        ),
+    )
+
+    embedding_source_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        doc=(
+            "SHA-256 of the exact text that was embedded, so a stale "
+            "vector is detectable.\n\n"
+            "Worth being precise about what this does NOT guard, because "
+            "the obvious reading is wrong. It does not catch the source "
+            "changing a posting: compute_content_hash() covers title, "
+            "company and location only, and mark_seen() refreshes neither "
+            "the description nor anything else, so a stored job's text "
+            "never changes after insert. What it catches is OUR text "
+            "rule changing. The day build_job_document() gains a field or "
+            "alters its format, every stored vector becomes stale while "
+            "still looking perfectly valid."
+        ),
+    )
+
     job_skills: Mapped[list[JobSkill]] = relationship(
         back_populates="job",
         cascade="all, delete-orphan",

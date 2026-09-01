@@ -163,4 +163,35 @@ class CVVersion(Base, TimestampMixin):
         nullable=True,
     )
 
+    # The same five columns as jobs, for the same reason: a NULL
+    # embedding is invisible rather than wrong. See app/db/models/job.py
+    # for the full reasoning.
+    #
+    # One difference in how they will be used. A job is embedded as a
+    # RETRIEVAL_DOCUMENT and a CV version as a RETRIEVAL_QUERY, because
+    # a CV is the thing doing the searching. Measured on the live API:
+    # the same text under the two task types comes back with cosine
+    # 0.861247, so the distinction is real and not decorative.
+    embedding_model: Mapped[str | None] = mapped_column(String(128))
+
+    embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    embedding_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+
+    embedding_error: Mapped[str | None] = mapped_column(
+        Text,
+        doc=(
+            "From a describe_*_error() helper only, never str(exc). A "
+            "provider error on this path can echo back the request, and "
+            "the request is a candidate's CV."
+        ),
+    )
+
+    embedding_source_hash: Mapped[str | None] = mapped_column(String(64))
+
     cv: Mapped[CV] = relationship(back_populates="versions")
