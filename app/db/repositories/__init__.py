@@ -6,8 +6,16 @@ layer exists to enforce.
 """
 
 from app.db.repositories.cv import CVRepository
+from app.db.repositories.job import IngestionRunRepository, JobRepository
 from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.skill import SkillRepository
 from app.db.repositories.user import UserRepository
 
-__all__ = ["CVRepository", "ProfileRepository", "SkillRepository", "UserRepository"]
+__all__ = [
+    "CVRepository",
+    "IngestionRunRepository",
+    "JobRepository",
+    "ProfileRepository",
+    "SkillRepository",
+    "UserRepository",
+]

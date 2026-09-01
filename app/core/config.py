@@ -43,6 +43,78 @@ class Settings(BaseSettings):
     # class of problem; run it against any new model before trusting it.
     gemini_model: str = "gemini-3.6-flash"
 
+    # --- Job ingestion (Day 6) ----------------------------------------------
+    # Adzuna authenticates with a PAIR of values, not a single token,
+    # and both travel as URL query parameters rather than headers.
+    # That is why app/integrations/adzuna.py never logs a URL and why
+    # every error path there goes through describe_http_error(): an
+    # httpx exception's string form embeds the full request URL, so
+    # printing one would leak both of these into the logs and into any
+    # error column that stored it.
+    adzuna_app_id: str = ""
+    adzuna_app_key: str = ""
+
+    # Country code as it appears in the API path, e.g. /v1/api/jobs/in/.
+    adzuna_country: str = "in"
+
+    # 50 is the documented maximum per page. Fewer results per page for
+    # the same number of jobs means more calls, and calls are the thing
+    # that is rationed -- see adzuna_max_pages_per_run.
+    adzuna_results_per_page: int = 50
+
+    # The free tier is roughly 1,000 calls per MONTH, which is about 33
+    # a day. Monthly rather than hourly matters: an hourly quota
+    # recovers while you make coffee, a monthly one does not, and
+    # spending it on Day 6 debugging leaves nothing for the Day 12
+    # demo. This cap is deliberately low; raise it once ingestion is
+    # known to work rather than before.
+    adzuna_max_pages_per_run: int = 2
+
+    # Freshness filter, sent to Adzuna as part of the request rather
+    # than applied after the response arrives. A job the API never
+    # sends is a call's worth of quota not spent and an embedding on
+    # Day 7 not generated.
+    adzuna_max_days_old: int = 14
+
+    # Comma-separated. EMPTY IS THE DEFAULT AND IT MEANS NO FILTER --
+    # every domain, tech and non-tech, across the whole country.
+    #
+    # Empty rather than a sensible-looking list of tech keywords on
+    # purpose. A default list is an assumption about who this is for,
+    # and a default that works is the hardest kind to notice and
+    # remove later. Adzuna also ANDs every word in `what`, measured:
+    # "machine learning engineer" returned 3 results where "machine
+    # learning" returned 23 for the same city and window. So keyword
+    # narrowing costs recall in a way that is invisible -- the jobs it
+    # drops are never seen, so they cannot be missed. Narrowing that
+    # cannot be audited does not belong in a default.
+    #
+    # Stored as a string rather than list[str] because pydantic-settings
+    # parses a list-typed field from the environment as JSON, so
+    # ADZUNA_QUERY_KEYWORDS=python,sales raises a parse error at import
+    # time rather than doing the obvious thing. A string plus an
+    # explicit split is less clever and does not surprise anyone.
+    adzuna_query_keywords: str = ""
+    adzuna_query_locations: str = ""
+
+    # Adzuna sorts by relevance by default. With no keyword to be
+    # relevant to, that ordering is arbitrary, and paginating an
+    # arbitrary order means every run reads a different arbitrary
+    # slice. Sorting by date makes page 1 mean "the newest postings",
+    # which is both reproducible and the thing actually wanted.
+    adzuna_sort_by: str = "date"
+
+    # How long a job may go unseen before it is marked inactive.
+    # Longer than adzuna_max_days_old on purpose: the freshness window
+    # controls what is INGESTED, this controls what is RETIRED, and
+    # retiring at the same age as the intake window would retire every
+    # job the moment it aged out of the query that finds it.
+    job_retire_after_days: int = 21
+
+    # A safety interlock on retirement, not a tuning knob. See
+    # JobIngestionService._retire_stale_jobs for why it exists.
+    job_retire_requires_run_within_days: int = 3
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -53,6 +125,28 @@ class Settings(BaseSettings):
     @property
     def max_cv_size_bytes(self) -> int:
         return self.max_cv_size_mb * 1024 * 1024
+
+    @property
+    def adzuna_keyword_list(self) -> list[str]:
+        """Parse ADZUNA_QUERY_KEYWORDS into a list.
+
+        An empty setting yields [""] rather than [] -- a single empty
+        keyword, which the client turns into a request with no `what`
+        parameter at all. That is what makes "no configuration" mean
+        "no filter" rather than "no queries", and it is the difference
+        between a fresh install ingesting everything and a fresh
+        install ingesting nothing.
+        """
+        parsed = [item.strip() for item in self.adzuna_query_keywords.split(",")]
+        parsed = [item for item in parsed if item]
+        return parsed or [""]
+
+    @property
+    def adzuna_location_list(self) -> list[str]:
+        """Parse ADZUNA_QUERY_LOCATIONS into a list. See adzuna_keyword_list."""
+        parsed = [item.strip() for item in self.adzuna_query_locations.split(",")]
+        parsed = [item for item in parsed if item]
+        return parsed or [""]
 
 
 @lru_cache

@@ -9,6 +9,8 @@ same logic usable from a web endpoint or a test.
 from app.services.cv_extraction import ExtractionResult, extract_cv
 from app.services.cv_intake import CVIntakeService, CVValidationError
 from app.services.cv_text import UnsupportedCVFormat, extract_raw_text
+from app.services.job_ingestion import IngestionResult, run_ingestion
+from app.services.locations import normalize_location
 from app.services.onboarding import DocumentOutcome, OnboardingService
 from app.services.profile import ProfileService
 from app.services.profile_view import ProfileSnapshot, render_profile
@@ -21,11 +23,14 @@ __all__ = [
     "CVValidationError",
     "DocumentOutcome",
     "ExtractionResult",
+    "IngestionResult",
     "OnboardingService",
     "ProfileService",
     "ProfileSnapshot",
     "UnsupportedCVFormat",
     "extract_cv",
     "extract_raw_text",
+    "normalize_location",
     "render_profile",
+    "run_ingestion",
 ]

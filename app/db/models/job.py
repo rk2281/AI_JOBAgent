@@ -57,7 +57,36 @@ class Job(Base, TimestampMixin):
         index=True,
     )
 
-    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        index=True,
+        doc=(
+            "When an ingestion run last saw this posting in the source's "
+            "results.\n\n"
+            "This is how a repost is handled. The same job appearing again "
+            "30 days later refreshes this row rather than creating a "
+            "second one, so a user is never re-notified about a posting "
+            "they already dismissed -- and the duplicate never reaches "
+            "Day 7's embedding call or Day 8's scoring, which is where it "
+            "would actually cost something.\n\n"
+            "It is also the input to expiry. A job unseen for longer than "
+            "job_retire_after_days becomes is_active=False. Note what this "
+            "does NOT mean: the source never says a vacancy has closed, "
+            "and our queries are keyword-scoped, so a posting absent from "
+            "today's results may simply not have matched today's search. "
+            "Unseen is a proxy for closed, not a synonym."
+        ),
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        default=True,
+        nullable=False,
+        doc=(
+            "False means retired for going unseen, not deleted. The row "
+            "stays so that a job which reappears keeps its history and its "
+            "embedding rather than being ingested afresh."
+        ),
+    )
 
     # Semantic embedding of the job text, generated on Day 7.
     # Nullable because a job is ingested (Day 6) before it is embedded;
