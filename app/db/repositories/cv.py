@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.cv import CV, CVVersion, ExtractionStatus
+from app.db.models.profile import Profile
 
 
 class CVRepository:
@@ -211,5 +212,112 @@ class CVRepository:
             .where(CV.user_id == user_id)
             .order_by(CV.created_at.desc(), CV.id.desc())
             .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    # --- embeddings (Day 7) -------------------------------------------------
+    #
+    # Scope: only the cv_versions row that a profile currently points
+    # at. NOT every version. User 2 alone has 24 cvs rows, most of them
+    # failed experiments from the Day 5 Gemini investigation, and
+    # embedding those would spend quota on text no query will ever
+    # compare against. profiles.active_cv_version_id is the definition
+    # of "the CV that counts", and it already excludes versions that
+    # failed the emptiness check.
+
+    async def list_active_versions_needing_embedding(
+        self,
+        limit: int,
+        retry_failed: bool = False,
+    ) -> list[CVVersion]:
+        """Active CV versions with no vector yet.
+
+        Joined through profiles rather than filtered on cvs, because
+        `superseded_at IS NULL` identifies a live CV while
+        `active_cv_version_id` identifies the specific version a
+        profile was built from. Those are not the same row when a CV
+        produced several versions.
+        """
+        query = (
+            select(CVVersion)
+            .join(Profile, Profile.active_cv_version_id == CVVersion.id)
+            .where(CVVersion.embedding.is_(None))
+        )
+        if not retry_failed:
+            query = query.where(CVVersion.embedding_attempts == 0)
+
+        result = await self._session.execute(
+            query.order_by(CVVersion.id).limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def count_active_versions(self) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(CVVersion)
+            .join(Profile, Profile.active_cv_version_id == CVVersion.id)
+        )
+        return int(result.scalar_one())
+
+    async def count_active_versions_missing_embedding(self) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(CVVersion)
+            .join(Profile, Profile.active_cv_version_id == CVVersion.id)
+            .where(CVVersion.embedding.is_(None))
+        )
+        return int(result.scalar_one())
+
+    async def set_version_embedding(
+        self,
+        version_id: int,
+        vector: list[float],
+        model: str,
+        source_hash: str,
+        embedded_at: datetime,
+    ) -> None:
+        await self._session.execute(
+            update(CVVersion)
+            .where(CVVersion.id == version_id)
+            .values(
+                embedding=vector,
+                embedding_model=model,
+                embedding_source_hash=source_hash,
+                embedded_at=embedded_at,
+                embedding_error=None,
+                embedding_attempts=CVVersion.embedding_attempts + 1,
+            )
+        )
+
+    async def mark_version_embedding_failed(
+        self,
+        version_id: int,
+        error: str,
+    ) -> None:
+        await self._session.execute(
+            update(CVVersion)
+            .where(CVVersion.id == version_id)
+            .values(
+                embedding_error=error,
+                embedding_attempts=CVVersion.embedding_attempts + 1,
+            )
+        )
+
+    async def active_version_with_embedding(
+        self,
+        user_id: int,
+    ) -> CVVersion | None:
+        """The embedded CV version a user's profile currently points at.
+
+        Reads through profiles.active_cv_version_id rather than taking
+        the newest version, because those are not the same row. The
+        active version is the one the profile was built from, and it is
+        guaranteed never to be a version that failed the emptiness
+        check.
+        """
+        result = await self._session.execute(
+            select(CVVersion)
+            .join(Profile, Profile.active_cv_version_id == CVVersion.id)
+            .where(Profile.user_id == user_id, CVVersion.embedding.isnot(None))
         )
         return result.scalar_one_or_none()

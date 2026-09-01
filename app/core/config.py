@@ -157,6 +157,24 @@ class Settings(BaseSettings):
     # it only after `--stage F --batch-size N` confirms the larger size.
     embedding_batch_size: int = 8
 
+    # Seconds to wait between embedding requests.
+    #
+    # The live quota is per-MINUTE, not per-day:
+    # global_embed_content_requests_per_minute_per_base_model. A run of
+    # 99 rows fires 13 batches back to back and gets a 429 partway
+    # through; observed behaviour was nine calls succeeding and the
+    # tenth failing, so the ceiling is near ten requests per minute.
+    #
+    # 7.0 rather than 6.0 deliberately. Ten requests per minute means
+    # 6.0 seconds apart is EXACTLY the limit, and a threshold hit
+    # exactly at its boundary is the case that fails while looking
+    # like it should pass. 7.0 gives roughly 8.5 requests per minute,
+    # which is under it rather than on it.
+    #
+    # Costs about 90 seconds for the full 99 rows. That is cheaper
+    # than a 429 halfway through, which costs a second run.
+    embedding_seconds_between_calls: float = 7.0
+
     # Jobs are documents to be searched; a CV is the query searching
     # them. Passing the same task type for both would waste the one
     # thing -001 offers over -2.
