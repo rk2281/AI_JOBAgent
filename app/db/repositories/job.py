@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.db.models.embedding import EmbeddingRun, EmbeddingStatus
 from app.db.models.ingestion import IngestionReject, IngestionRun, IngestionStatus
 from app.db.models.job import Job, JobSkill
+from app.db.models.skill import Skill
 
 
 class JobRepository:
@@ -544,6 +545,120 @@ class JobRepository:
         )
         await self._session.flush()
         return len(skill_ids)
+
+    # --- scoring (Day 8) -----------------------------------------------------
+    #
+    # "Scorable" means three things at once: active, embedded, and not
+    # excluded. Each of the three exclusions it replaces means something
+    # different, and the scoring run counts them separately rather than
+    # folding them into one "skipped" number. An inactive job is a guess
+    # about closure. A job with no embedding is INVISIBLE to similarity
+    # search -- not ranked low, absent, because `ORDER BY embedding <=> :q`
+    # never returns a NULL row. An excluded job is a human decision, made
+    # by hand about one specific posting. Collapsing the three would hide
+    # which one actually happened when a job goes missing from scoring.
+
+    async def count_scorable_jobs(self) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.is_active.is_(True),
+                Job.embedding.isnot(None),
+                Job.is_excluded.is_(False),
+            )
+        )
+        return int(result.scalar_one())
+
+    async def list_scorable_jobs(self) -> list[Job]:
+        """Every job eligible to be scored against a candidate.
+
+        See the class comment above for why active/embedded/not-excluded
+        are three separate conditions rather than one. Ordered by id so
+        two runs over the same data enumerate jobs the same way.
+        """
+        result = await self._session.execute(
+            select(Job)
+            .where(
+                Job.is_active.is_(True),
+                Job.embedding.isnot(None),
+                Job.is_excluded.is_(False),
+            )
+            .order_by(Job.id)
+        )
+        return list(result.scalars().all())
+
+    async def skills_for_jobs(self, job_ids: list[int]) -> dict[int, list[str]]:
+        """Normalized skill keys for a batch of jobs, one query.
+
+        Every requested id is a key in the result, even a job with zero
+        job_skills rows -- it gets an empty list, not a missing key. A
+        missing key and an empty list would be indistinguishable at the
+        call site, and the scorer needs "no skills" to actually reach
+        score_skill() so it can abstain there; a job silently absent
+        from this dict would abstain for a reason nothing records.
+
+        Returns skills.normalized_name, not skills.name, because that
+        is the matching surface profiles.skills is written in.
+        """
+        result: dict[int, list[str]] = {job_id: [] for job_id in job_ids}
+        if not job_ids:
+            return result
+
+        rows = await self._session.execute(
+            select(JobSkill.job_id, Skill.normalized_name)
+            .join(Skill, Skill.id == JobSkill.skill_id)
+            .where(JobSkill.job_id.in_(job_ids))
+        )
+        for job_id, normalized_name in rows.all():
+            result[job_id].append(normalized_name)
+
+        return result
+
+    async def count_active_missing_embedding_scorable(self) -> int:
+        """Active, not excluded, still unembedded.
+
+        The number that explains how many otherwise-eligible jobs could
+        not be scored at all this run, as distinct from jobs held back
+        by exclusion. Feeds scoring_runs.jobs_skipped_no_embedding.
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.is_active.is_(True),
+                Job.embedding.is_(None),
+                Job.is_excluded.is_(False),
+            )
+        )
+        return int(result.scalar_one())
+
+    async def count_active_embedded_jobs(self) -> int:
+        """The candidate pool nearest_to() actually searches.
+
+        Active and embedded, INCLUDING excluded rows -- deliberately
+        the one Day 8 count that ignores `is_excluded`, because it
+        exists to match nearest_to()'s own WHERE clause exactly. Any
+        divergence between the two is the bug this method was added
+        to close: a limit drawn from a smaller set than the query
+        selects from silently truncates the far end of the result.
+
+        Counted independently rather than derived as
+        count_active_jobs() - count_active_missing_embedding(). Those
+        two subtract to the same value today, and a subtraction can
+        never disagree with itself -- it would make the funnel
+        assertion an equation solved to be true rather than a check.
+        Two queries that can disagree are the point.
+        """
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.is_active.is_(True),
+                Job.embedding.isnot(None),
+            )
+        )
+        return int(result.scalar_one())
 
 
 class IngestionRunRepository:

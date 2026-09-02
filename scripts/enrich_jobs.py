@@ -89,8 +89,12 @@ async def main() -> int:
 
             print(f"model              {settings.gemini_model}")
             print(f"active jobs        {total}")
-            print(f"missing skills     {missing}")
-            print(f"would enrich       {calls}")
+            # These two count different things and are not expected to
+            # agree: never_attempted is rows with no attempt recorded at
+            # all, while eligible_to_try also includes rows already tried
+            # once or twice but still under the retry ceiling.
+            print(f"never attempted    {missing}")
+            print(f"eligible to try    {calls}")
             print(f"skipped (empty)    {result['skipped_empty_text']}")
             print(f"API calls budget   {calls}")
             print(f"estimated time     {low:.0f}s .. {high:.0f}s")
