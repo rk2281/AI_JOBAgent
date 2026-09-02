@@ -211,7 +211,38 @@ def select_status(
     return ScoringStatus.COMPLETE_NO_QUALIFYING
 
 
-async def _target_user_ids(session, user_id: int | None) -> list[int]:
+def is_scorable_user(*, profile_present: bool, embedded_version_present: bool) -> bool:
+    """Whether one user can be scored at all.
+
+    Trivial on purpose. Its value is not the expression but the fact
+    that there is exactly ONE of it: run_scoring's loop and
+    resolve_scoring_targets() both call this, so the graph can never
+    stop on a definition of "scorable" that differs from the one
+    scoring actually applies. Two independent expressions of this rule
+    would agree on the day they were written and drift the first time
+    either moved -- and the drift would be invisible, because both
+    sides would still produce a plausible count.
+
+    Note what this CANNOT distinguish, because the distinction is
+    already gone by the time it is called: a user with no active CV
+    version and a user whose active version has no embedding both
+    arrive here as embedded_version_present=False, since
+    active_version_with_embedding() filters both in SQL. run_scoring
+    folds them into one users_skipped_no_cv for the same reason. Only
+    the second is fixable by running the embedding pass, so that
+    conflation is a known open issue, not a decision -- see the Day 9
+    record. Do not "fix" it here by splitting this predicate; that
+    would make the graph's definition differ from scoring's, which is
+    exactly what this function exists to prevent.
+
+    Extracted so the whole truth table can be tested without a
+    database, the same way is_notify_eligible() and select_status()
+    were. The callers are unchanged.
+    """
+    return profile_present and embedded_version_present
+
+
+async def select_target_user_ids(session, user_id: int | None) -> list[int]:
     """Which users to score: one, or everyone with a profile.
 
     A direct query against Profile rather than a ProfileRepository
@@ -219,12 +250,73 @@ async def _target_user_ids(session, user_id: int | None) -> list[int]:
     query this run needs and no other caller of ProfileRepository
     does -- adding it there would grow that repository for a single
     consumer.
+
+    Public rather than private because resolve_scoring_targets() needs
+    the same list, and a second query for "users with a profile" is a
+    second place for that definition to live.
     """
     if user_id is not None:
         return [user_id]
 
     result = await session.execute(select(Profile.user_id))
     return [row[0] for row in result.all()]
+
+
+async def resolve_scoring_targets(*, user_id: int | None = None) -> dict:
+    """How many users could be scored right now, and which.
+
+    Exists so a caller can find out whether there is anything worth
+    running BEFORE spending an ingestion pass or a day's enrichment
+    quota on a run that would score nobody. run_scoring answers the
+    same question, but only after doing all of the work.
+
+    Owns its own session, like run_ingestion and run_scoring, and takes
+    none -- so no session, no ORM instance and no lazy relationship
+    ever crosses back to the caller. Everything returned is an int or a
+    list of ints, which is what makes it safe to put in a checkpointed
+    workflow state.
+
+    Deliberately does NOT read preferences. A user with no preference
+    row is still scored, using defaults (see run_scoring); consulting
+    preferences here would imply a gate that does not exist.
+
+    This re-reads profiles and CV versions that run_scoring will read
+    again moments later. That duplicate read is accepted rather than
+    cached: holding the rows would mean carrying ORM objects across a
+    boundary, and the cost is a handful of queries over a table with
+    three rows in it.
+    """
+    async with session_scope() as session:
+        target_ids = await select_target_user_ids(session, user_id)
+
+        profile_repository = ProfileRepository(session)
+        cv_repository = CVRepository(session)
+
+        users_with_profile = 0
+        scorable_ids: list[int] = []
+
+        for uid in target_ids:
+            profile = await profile_repository.get_by_user_id(uid)
+            if profile is not None:
+                users_with_profile += 1
+
+            version = None
+            if profile is not None:
+                version = await cv_repository.active_version_with_embedding(uid)
+
+            if is_scorable_user(
+                profile_present=profile is not None,
+                embedded_version_present=version is not None,
+            ):
+                scorable_ids.append(uid)
+
+    return {
+        "requested_user_id": user_id,
+        "users_considered": len(target_ids),
+        "users_with_profile": users_with_profile,
+        "users_with_embedded_cv": len(scorable_ids),
+        "target_user_ids": scorable_ids,
+    }
 
 
 async def run_scoring(
@@ -299,7 +391,7 @@ async def run_scoring(
 
     if counters.jobs_scored > 0:
         async with session_scope() as session:
-            target_ids = await _target_user_ids(session, user_id)
+            target_ids = await select_target_user_ids(session, user_id)
 
         # Scales to the POOL, not to jobs_scored. pgvector's HNSW keeps
         # only ef_search candidates in flight, so an ef_search below the
@@ -321,7 +413,10 @@ async def run_scoring(
                     version = await CVRepository(session).active_version_with_embedding(uid)
                     preferences = await UserRepository(session).get_preferences(uid)
 
-                if profile is None or version is None:
+                if not is_scorable_user(
+                    profile_present=profile is not None,
+                    embedded_version_present=version is not None,
+                ):
                     counters.users_skipped_no_cv += 1
                     continue
 

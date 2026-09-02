@@ -13,11 +13,14 @@ written to include.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from app.core.config import settings
 from app.db.models.scoring import ScoringStatus
-from app.services.job_scoring import is_notify_eligible, select_status
+from app.services.job_scoring import is_notify_eligible, is_scorable_user, select_status
 
 
 # --- the notify gates, at exactly their boundaries -------------------------
@@ -247,3 +250,97 @@ def test_pair_funnel_balances_after_the_fix() -> None:
 def test_pair_funnel_balances_for_several_users() -> None:
     jobs_scored, users_scored, pairs_scored = 98, 3, 294
     assert pairs_scored == jobs_scored * users_scored
+
+
+# --- who can be scored at all -------------------------------------------
+#
+# The four states a user can be in, and the reason two of them are one
+# test input rather than two: active_version_with_embedding() filters
+# "no active version" and "active version with no embedding" in SQL, so
+# both reach is_scorable_user() as embedded_version_present=False. Each
+# is written out separately anyway, because the INTENT of the two cases
+# differs -- only the third is fixable by running the embedding pass --
+# and a test that records intent survives a refactor that a merged test
+# would not.
+
+
+def test_profile_absent_is_not_scorable() -> None:
+    assert (
+        is_scorable_user(profile_present=False, embedded_version_present=False)
+        is False
+    )
+
+
+def test_profile_without_an_active_cv_version_is_not_scorable() -> None:
+    """State 2: profiles.active_cv_version_id IS NULL."""
+    assert (
+        is_scorable_user(profile_present=True, embedded_version_present=False)
+        is False
+    )
+
+
+def test_active_cv_version_without_an_embedding_is_not_scorable() -> None:
+    """State 3: the version exists but cv_versions.embedding IS NULL.
+
+    Indistinguishable from state 2 at this boundary, and that is the
+    point being recorded: scoring cannot tell them apart either.
+    """
+    assert (
+        is_scorable_user(profile_present=True, embedded_version_present=False)
+        is False
+    )
+
+
+def test_profile_with_an_embedded_active_version_is_scorable() -> None:
+    """State 4, the only scorable one."""
+    assert (
+        is_scorable_user(profile_present=True, embedded_version_present=True)
+        is True
+    )
+
+
+def test_an_embedded_version_without_a_profile_is_not_scorable() -> None:
+    """Cannot occur through the repository -- the query joins THROUGH
+    profiles -- but the predicate must not treat it as scorable if it
+    is ever called directly.
+    """
+    assert (
+        is_scorable_user(profile_present=False, embedded_version_present=True)
+        is False
+    )
+
+
+# --- the cross-check script must stay independent -----------------------
+
+
+def test_scorable_targets_check_does_not_reference_the_shared_predicate() -> None:
+    """scripts/scorable_targets_check.py is an ORACLE, not a caller.
+
+    Its whole value is that it reaches the same answer by a route that
+    shares no code with the thing it checks. The moment it imports
+    is_scorable_user or select_target_user_ids, its agreement becomes
+    circular -- two callers of one predicate always agree -- while it
+    goes on printing "AGREE" exactly as before. That is the failure
+    this test exists to make loud.
+
+    A denylist, not a whitelist: the script is free to grow any other
+    import it needs. Only these two names are forbidden.
+    """
+    forbidden = {"is_scorable_user", "select_target_user_ids"}
+    path = Path(__file__).resolve().parents[1] / "scripts" / "scorable_targets_check.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    imported: set[str] = set()
+    referenced: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imported.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.Attribute):
+            referenced.add(node.attr)
+        elif isinstance(node, ast.Name):
+            referenced.add(node.id)
+
+    assert not (imported & forbidden), "the oracle imports the predicate it checks"
+    # Catches an attribute call that skipped the import, e.g.
+    # job_scoring.is_scorable_user(...).
+    assert not (referenced & forbidden), "the oracle references the predicate it checks"
