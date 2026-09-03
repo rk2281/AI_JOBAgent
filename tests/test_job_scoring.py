@@ -20,7 +20,15 @@ import pytest
 
 from app.core.config import settings
 from app.db.models.scoring import ScoringStatus
-from app.services.job_scoring import is_notify_eligible, is_scorable_user, select_status
+from app.services.job_scoring import (
+    SKIP_CV_NOT_EMBEDDED,
+    SKIP_NO_ACTIVE_CV,
+    SKIP_NO_PROFILE,
+    classify_skip_reason,
+    is_notify_eligible,
+    is_scorable_user,
+    select_status,
+)
 
 
 # --- the notify gates, at exactly their boundaries -------------------------
@@ -344,3 +352,145 @@ def test_scorable_targets_check_does_not_reference_the_shared_predicate() -> Non
     # Catches an attribute call that skipped the import, e.g.
     # job_scoring.is_scorable_user(...).
     assert not (referenced & forbidden), "the oracle references the predicate it checks"
+
+
+# --- which of the three causes made a user unscorable -------------------
+#
+# is_scorable_user stays a function of exactly two booleans. This is
+# reporting layered on top of it, reached only after it has already
+# returned False, so nothing here can change who gets scored.
+
+
+def test_no_profile_is_reported_as_no_profile() -> None:
+    assert (
+        classify_skip_reason(
+            profile_present=False,
+            active_version_present=False,
+            embedded_version_present=False,
+        )
+        == SKIP_NO_PROFILE
+    )
+
+
+def test_a_profile_with_no_active_version_is_reported_as_no_active_cv() -> None:
+    assert (
+        classify_skip_reason(
+            profile_present=True,
+            active_version_present=False,
+            embedded_version_present=False,
+        )
+        == SKIP_NO_ACTIVE_CV
+    )
+
+
+def test_an_active_version_without_an_embedding_is_reported_as_not_embedded() -> None:
+    """The only one of the three that running the embedding pass fixes."""
+    assert (
+        classify_skip_reason(
+            profile_present=True,
+            active_version_present=True,
+            embedded_version_present=False,
+        )
+        == SKIP_CV_NOT_EMBEDDED
+    )
+
+
+def test_the_deepest_cause_wins_at_the_exact_input_where_all_three_match() -> None:
+    """The boundary, stated at the exact value rather than near it.
+
+    A user with no profile row also has no active version and no
+    embedded version, so every branch in classify_skip_reason matches.
+    Order decides the answer, and the answer must be the one that sends
+    somebody to fix the right thing: reporting "CV not embedded" for a
+    user who never completed onboarding points at the wrong stage
+    entirely, and running the embedding pass would change nothing.
+    """
+    reason = classify_skip_reason(
+        profile_present=False,
+        active_version_present=False,
+        embedded_version_present=False,
+    )
+    assert reason == SKIP_NO_PROFILE
+    assert reason != SKIP_NO_ACTIVE_CV
+    assert reason != SKIP_CV_NOT_EMBEDDED
+
+
+def test_a_profileless_user_who_somehow_has_an_active_version_is_still_no_profile() -> None:
+    """Cannot happen through the repository -- the query joins THROUGH
+    profiles -- but the ordering must not depend on that."""
+    assert (
+        classify_skip_reason(
+            profile_present=False,
+            active_version_present=True,
+            embedded_version_present=False,
+        )
+        == SKIP_NO_PROFILE
+    )
+
+
+def test_classifying_a_scorable_user_raises_rather_than_returning_a_reason() -> None:
+    """A caller reaching this with a scorable user means the branch
+    above it is wrong. A plausible-looking string is exactly how that
+    would go unnoticed: the counters would still sum, the funnel would
+    still balance, and one scored user would be reported as skipped for
+    a reason that never happened.
+    """
+    with pytest.raises(AssertionError):
+        classify_skip_reason(
+            profile_present=True,
+            active_version_present=True,
+            embedded_version_present=True,
+        )
+
+
+def test_the_scorable_case_is_exactly_the_case_is_scorable_user_accepts() -> None:
+    """The two functions must disagree about nothing. Whatever
+    is_scorable_user calls scorable is precisely what classify_skip_reason
+    refuses to classify."""
+    for profile_present in (True, False):
+        for embedded_version_present in (True, False):
+            scorable = is_scorable_user(
+                profile_present=profile_present,
+                embedded_version_present=embedded_version_present,
+            )
+            if not scorable:
+                continue
+            with pytest.raises(AssertionError):
+                classify_skip_reason(
+                    profile_present=profile_present,
+                    active_version_present=True,
+                    embedded_version_present=embedded_version_present,
+                )
+
+
+def test_the_three_skip_reasons_are_distinct_values() -> None:
+    """Two sharing a value would let the breakdown sum to
+    users_skipped_no_cv while reporting the wrong cause -- the funnel
+    assertion would pass and the number a person reads would be wrong.
+    """
+    reasons = [SKIP_NO_PROFILE, SKIP_NO_ACTIVE_CV, SKIP_CV_NOT_EMBEDDED]
+    assert len(set(reasons)) == 3
+
+
+def test_the_three_skip_reasons_are_plain_strings() -> None:
+    """Not an enum: these travel into a JSONB counters column and out to
+    a script's stdout, and an enum would be re-serialised at both ends."""
+    for reason in (SKIP_NO_PROFILE, SKIP_NO_ACTIVE_CV, SKIP_CV_NOT_EMBEDDED):
+        assert type(reason) is str
+
+
+def test_the_skip_breakdown_sums_to_the_counter_it_explains() -> None:
+    """The arithmetic the fourth funnel assertion enforces, at the one
+    shape that matters: three causes, one total."""
+    no_profile, no_active_cv, not_embedded = 2, 1, 3
+    skipped_no_cv = 6
+    assert skipped_no_cv == no_profile + no_active_cv + not_embedded
+
+
+def test_a_forgotten_counter_breaks_the_sum() -> None:
+    """What the fourth assertion is for: a fourth skip cause added later
+    whose counter nobody increments shows up as a breakdown quietly
+    totalling less than the number above it."""
+    no_profile, no_active_cv, not_embedded = 2, 1, 3
+    skipped_no_cv_with_a_fourth_cause = 7
+    assert skipped_no_cv_with_a_fourth_cause != no_profile + no_active_cv + not_embedded

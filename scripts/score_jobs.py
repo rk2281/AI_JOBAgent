@@ -171,6 +171,12 @@ async def main() -> int:
         print("--- funnel: users")
         print(f"users_considered          {result['users_considered']}")
         print(f"users_skipped_no_cv       {result['users_skipped_no_cv']}")
+        # The breakdown of the line above. Only cv_not_embedded is
+        # fixable by running the embedding pass, so a person reading
+        # this needs to see which cause applied, not just the total.
+        print(f"  no_profile              {result['users_skipped_no_profile']}")
+        print(f"  no_active_cv            {result['users_skipped_no_active_cv']}")
+        print(f"  cv_not_embedded         {result['users_skipped_cv_not_embedded']}")
         print(f"users_scored              {result['users_scored']}")
         print("--- funnel: jobs")
         print(f"jobs_considered           {result['jobs_considered']}")

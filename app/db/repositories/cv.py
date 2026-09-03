@@ -303,6 +303,32 @@ class CVRepository:
             )
         )
 
+    async def active_version(self, user_id: int) -> CVVersion | None:
+        """The active CV version, embedded or not. FOR REPORTING ONLY.
+
+        This is NOT a second definition of "scorable" and must never be
+        called on the scorable path. Scorability is
+        active_version_with_embedding() plus a profile, decided by
+        is_scorable_user(), and there is exactly one of that on purpose.
+
+        It exists because active_version_with_embedding() returns None
+        for two different reasons -- no active version at all, and an
+        active version whose embedding is NULL -- and run_scoring folds
+        both into one users_skipped_no_cv. Only the second is fixable by
+        running the embedding pass, so a person reading that counter
+        cannot tell whether there is anything to do about it.
+
+        Identical to active_version_with_embedding() minus the
+        embedding filter. Called only AFTER a user has already been
+        determined unscorable, to say which of the causes applied.
+        """
+        result = await self._session.execute(
+            select(CVVersion)
+            .join(Profile, Profile.active_cv_version_id == CVVersion.id)
+            .where(Profile.user_id == user_id)
+        )
+        return result.scalar_one_or_none()
+
     async def active_version_with_embedding(
         self,
         user_id: int,

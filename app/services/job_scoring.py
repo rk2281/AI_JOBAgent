@@ -95,7 +95,24 @@ class _Counters:
     two equalities the service asserts before returning."""
 
     users_considered: int = 0
+
+    # Kept under this name deliberately, even though it counts three
+    # things and only one of them is literally "no CV". Renaming it
+    # would make every scoring_runs row written before the breakdown
+    # existed unreadable against every row written after -- a column
+    # that means one thing up to a date and another thing afterwards is
+    # worse than a column with an imprecise name. The three counters
+    # below say which cause applied; this one stays comparable.
     users_skipped_no_cv: int = 0
+
+    # The breakdown. Sums to users_skipped_no_cv, asserted after the
+    # loop. no_profile means the user never got that far; no_active_cv
+    # means a profile with no active version; cv_not_embedded is the
+    # only one of the three that running the embedding pass would fix.
+    users_skipped_no_profile: int = 0
+    users_skipped_no_active_cv: int = 0
+    users_skipped_cv_not_embedded: int = 0
+
     users_scored: int = 0
 
     jobs_considered: int = 0
@@ -211,6 +228,16 @@ def select_status(
     return ScoringStatus.COMPLETE_NO_QUALIFYING
 
 
+# The three reasons a user is not scorable. Strings rather than an enum
+# because these travel into a JSONB counters column and out to a
+# script's stdout; an enum would be re-serialised at both ends, and the
+# value stored in Postgres would be a different object from the value a
+# test compares against.
+SKIP_NO_PROFILE = "no_profile"
+SKIP_NO_ACTIVE_CV = "no_active_cv"
+SKIP_CV_NOT_EMBEDDED = "cv_not_embedded"
+
+
 def is_scorable_user(*, profile_present: bool, embedded_version_present: bool) -> bool:
     """Whether one user can be scored at all.
 
@@ -240,6 +267,46 @@ def is_scorable_user(*, profile_present: bool, embedded_version_present: bool) -
     were. The callers are unchanged.
     """
     return profile_present and embedded_version_present
+
+
+def classify_skip_reason(
+    *,
+    profile_present: bool,
+    active_version_present: bool,
+    embedded_version_present: bool,
+) -> str:
+    """Which of the three causes made this user unscorable.
+
+    CALLED ONLY AFTER is_scorable_user() HAS RETURNED FALSE. That is
+    what makes this structurally incapable of changing who gets scored:
+    the gate above is still a function of exactly two booleans, this
+    reads a third, and nothing here feeds back into the decision. It is
+    reporting layered on top of a rule, not a second rule.
+
+    Most fundamental cause first, and the order is the whole point. A
+    user with no profile row also has no active version and no embedded
+    version, so all three flags are False and every branch below would
+    match. `no_profile` is the one that sends somebody to fix the right
+    thing -- telling them the CV is not embedded when the user never
+    completed onboarding would point at the wrong stage entirely.
+
+    Asserts rather than returning a fallback when handed a scorable
+    user. A caller reaching this with one means the branch above it is
+    wrong, and a plausible-looking string is exactly how that would go
+    unnoticed: the counters would still sum, the funnel would still
+    balance, and one scorable user would be reported as skipped for a
+    reason that never happened.
+    """
+    assert not (profile_present and embedded_version_present), (
+        "classify_skip_reason called on a scorable user; "
+        "the is_scorable_user branch above it is wrong"
+    )
+
+    if not profile_present:
+        return SKIP_NO_PROFILE
+    if not active_version_present:
+        return SKIP_NO_ACTIVE_CV
+    return SKIP_CV_NOT_EMBEDDED
 
 
 async def select_target_user_ids(session, user_id: int | None) -> list[int]:
@@ -418,6 +485,28 @@ async def run_scoring(
                     embedded_version_present=version is not None,
                 ):
                     counters.users_skipped_no_cv += 1
+
+                    # One extra query, on the skipped branch only: a run
+                    # that skips nobody pays nothing for this. The
+                    # cheaper option is the single aggregate query in
+                    # scripts/scorable_targets_check.py, and it was
+                    # rejected twice over -- it observes the PLAN
+                    # (counts read around the loop) where this observes
+                    # the WORK, and reusing it would make that script
+                    # share code with the thing it cross-checks, which
+                    # is precisely what its independence test forbids.
+                    active = await CVRepository(session).active_version(uid)
+                    reason = classify_skip_reason(
+                        profile_present=profile is not None,
+                        active_version_present=active is not None,
+                        embedded_version_present=version is not None,
+                    )
+                    if reason == SKIP_NO_PROFILE:
+                        counters.users_skipped_no_profile += 1
+                    elif reason == SKIP_NO_ACTIVE_CV:
+                        counters.users_skipped_no_active_cv += 1
+                    else:
+                        counters.users_skipped_cv_not_embedded += 1
                     continue
 
                 counters.users_scored += 1
@@ -602,6 +691,25 @@ async def run_scoring(
         f"dropped_excluded={counters.nearest_dropped_excluded} "
         f"dropped_unscorable={counters.nearest_dropped_unscorable}"
     )
+    # A fourth, and it observes the work in a different way again from
+    # the third. The third compares what the loop produced against a
+    # product of two counts; this one compares four counters that all
+    # increment INSIDE the loop, on the same branch, on the same pass.
+    # It therefore cannot balance while the loop misattributes a cause:
+    # there is no arithmetic path to a wrong breakdown that still sums.
+    # What it catches is a fourth skip cause added later whose counter
+    # somebody forgot to increment -- which would otherwise show up as
+    # a breakdown quietly totalling less than the number above it.
+    assert counters.users_skipped_no_cv == (
+        counters.users_skipped_no_profile
+        + counters.users_skipped_no_active_cv
+        + counters.users_skipped_cv_not_embedded
+    ), (
+        f"skip breakdown does not sum: skipped_no_cv={counters.users_skipped_no_cv} "
+        f"no_profile={counters.users_skipped_no_profile} "
+        f"no_active_cv={counters.users_skipped_no_active_cv} "
+        f"cv_not_embedded={counters.users_skipped_cv_not_embedded}"
+    )
 
     distinct_score_count = len(set(all_final_scores))
 
@@ -641,6 +749,9 @@ async def run_scoring(
                 counters={
                     "users_considered": counters.users_considered,
                     "users_skipped_no_cv": counters.users_skipped_no_cv,
+                    "users_skipped_no_profile": counters.users_skipped_no_profile,
+                    "users_skipped_no_active_cv": counters.users_skipped_no_active_cv,
+                    "users_skipped_cv_not_embedded": counters.users_skipped_cv_not_embedded,
                     "users_scored": counters.users_scored,
                     "jobs_considered": counters.jobs_considered,
                     "jobs_skipped_no_embedding": counters.jobs_skipped_no_embedding,
@@ -674,6 +785,9 @@ async def run_scoring(
         "run_id": run_id,
         "users_considered": counters.users_considered,
         "users_skipped_no_cv": counters.users_skipped_no_cv,
+        "users_skipped_no_profile": counters.users_skipped_no_profile,
+        "users_skipped_no_active_cv": counters.users_skipped_no_active_cv,
+        "users_skipped_cv_not_embedded": counters.users_skipped_cv_not_embedded,
         "users_scored": counters.users_scored,
         "jobs_considered": counters.jobs_considered,
         "jobs_skipped_no_embedding": counters.jobs_skipped_no_embedding,
