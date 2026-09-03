@@ -640,9 +640,28 @@ settings = get_settings()
 # Both spellings are checked. langchain-core renamed LANGCHAIN_* to
 # LANGSMITH_* and still honours the old names, so checking only the newer
 # pair would return a clean answer while tracing was on.
-_TRACING_ENV_VARS = (
+# The two categories are read DIFFERENTLY, and that is the whole design.
+#
+# A flag carries a value that means something. `false` is the documented
+# way to turn tracing off and it is what appears in Compose files, CI
+# configs and deployment templates written by people being careful. So
+# an earlier version of this check, which treated any non-empty value as
+# enabled, fired hardest on the environment it was built to bless: the
+# process died claiming tracing was on, in front of a config line saying
+# it was off. A guard that is wrong in exactly the case it exists to
+# approve gets deleted by the next person under time pressure, and then
+# there is no guard at all. That is why this is not a style preference.
+_TRACING_FLAG_VARS = (
+    "LANGCHAIN_TRACING",
     "LANGCHAIN_TRACING_V2",
     "LANGSMITH_TRACING",
+)
+
+# A credential or a destination carries no such meaning. There is no
+# legitimate reason for LANGSMITH_API_KEY to exist in an environment
+# that is not tracing, so its mere PRESENCE stays a signal regardless of
+# content -- there is no value it could hold that makes it innocent.
+_TRACING_CREDENTIAL_VARS = (
     "LANGCHAIN_API_KEY",
     "LANGSMITH_API_KEY",
     "LANGCHAIN_ENDPOINT",
@@ -650,6 +669,32 @@ _TRACING_ENV_VARS = (
     "LANGCHAIN_PROJECT",
     "LANGSMITH_PROJECT",
 )
+
+_TRACING_ENV_VARS = _TRACING_FLAG_VARS + _TRACING_CREDENTIAL_VARS
+
+# Only the DISABLED values are enumerated, deliberately. Listing the
+# enabled ones instead -- true, 1, yes, on -- would make an unrecognised
+# value fall through to "not enabled", which is the unsafe direction,
+# and it would get there by accident rather than by decision. Written
+# this way, an unparseable flag counts as ENABLED: somebody set the
+# variable intending something, we cannot tell what, and the two errors
+# are not symmetric. A false positive costs a crash with a readable
+# message naming the variable. A false negative costs CV-derived profile
+# text exported to a third party with no signal at all.
+_FLAG_DISABLED_VALUES = frozenset({"false", "0", "no", "off"})
+
+
+def _flag_is_enabled(raw: str) -> bool:
+    """Read one tracing flag the way langchain-core does.
+
+    Case-insensitive, surrounding whitespace stripped. Empty and
+    whitespace-only are not enabled, which is also how an absent
+    variable arrives here.
+    """
+    value = raw.strip().lower()
+    if not value:
+        return False
+    return value not in _FLAG_DISABLED_VALUES
 
 
 def tracing_vars_set(environ: Mapping[str, str]) -> list[str]:
@@ -666,15 +711,27 @@ def tracing_vars_set(environ: Mapping[str, str]) -> list[str]:
     process. Output is sorted, so the message a failure prints is the
     same on every machine.
 
-    An empty or whitespace-only value counts as UNSET, because that is
-    how langchain-core reads them. Note the consequence, which is
-    deliberate: any other value counts as set, so LANGCHAIN_TRACING_V2
-    set to "false" is reported. That is stricter than langchain-core and
-    it fails closed -- somebody disabling tracing by value rather than
-    by unsetting gets an error they can act on, which is the direction
-    to be wrong in when the alternative is silently exporting CV text.
+    Flags are parsed for truthiness; credentials and destinations are
+    checked for presence. See the two tuples above for why those are not
+    the same question.
+
+    Note what the flag branch means for this function's own rule. It is
+    the only part of this module that READS a value, and it must not let
+    one escape: the value is consumed by _flag_is_enabled() and only the
+    NAME is appended. A version that helpfully reported which value it
+    rejected would be the leak.
     """
-    return sorted(name for name in _TRACING_ENV_VARS if (environ.get(name) or "").strip())
+    found = [
+        name
+        for name in _TRACING_FLAG_VARS
+        if _flag_is_enabled(environ.get(name) or "")
+    ]
+    found += [
+        name
+        for name in _TRACING_CREDENTIAL_VARS
+        if (environ.get(name) or "").strip()
+    ]
+    return sorted(found)
 
 
 def assert_tracing_disabled(environ: Mapping[str, str] | None = None) -> None:

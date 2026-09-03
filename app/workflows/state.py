@@ -396,6 +396,21 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
         "enrichment_remaining_null": enrichment.get("remaining_null"),
         "scoring_status": scoring.get("status"),
         "scoring_run_id": scoring.get("run_id"),
+        # The skip total and the three causes behind it. run_agent.py is
+        # the path that runs unattended with nobody watching, so a
+        # scheduled run that silently stopped scoring somebody would
+        # otherwise emit a summary indistinguishable from a healthy
+        # quiet day, in the only artifact that run produces.
+        #
+        # .get() with no default, like every counter around it: absent
+        # is None and NOT zero. A scoring stage that never ran has no
+        # opinion about how many users were skipped, and defaulting it
+        # to 0 would state one -- the same mistake as defaulting an
+        # abstained signal column to 0.0.
+        "users_skipped_no_cv": scoring.get("users_skipped_no_cv"),
+        "users_skipped_no_profile": scoring.get("users_skipped_no_profile"),
+        "users_skipped_no_active_cv": scoring.get("users_skipped_no_active_cv"),
+        "users_skipped_cv_not_embedded": scoring.get("users_skipped_cv_not_embedded"),
         "users_scored": scoring.get("users_scored"),
         "jobs_scored": scoring.get("jobs_scored"),
         "pairs_scored": scoring.get("pairs_scored"),

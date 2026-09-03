@@ -47,8 +47,14 @@ from app.workflows.routing import (
     ROUTE_AFTER_TARGETS,
     ROUTE_NOTIFICATION,
 )
-from app.core.config import assert_tracing_disabled, tracing_vars_set
-from app.workflows.state import initial_state
+from app.core.config import (
+    _TRACING_CREDENTIAL_VARS,
+    _TRACING_ENV_VARS,
+    _TRACING_FLAG_VARS,
+    assert_tracing_disabled,
+    tracing_vars_set,
+)
+from app.workflows.state import build_run_summary, initial_state
 
 _WORKFLOWS_DIR = Path(__file__).resolve().parents[1] / "app" / "workflows"
 
@@ -451,23 +457,17 @@ def test_a_clean_environment_reports_nothing() -> None:
     assert tracing_vars_set({"PATH": "/usr/bin", "HOME": "/home/x"}) == []
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "LANGCHAIN_TRACING_V2",
-        "LANGSMITH_TRACING",
-        "LANGCHAIN_API_KEY",
-        "LANGSMITH_API_KEY",
-        "LANGCHAIN_ENDPOINT",
-        "LANGSMITH_ENDPOINT",
-        "LANGCHAIN_PROJECT",
-        "LANGSMITH_PROJECT",
-    ],
-)
+@pytest.mark.parametrize("name", sorted(_TRACING_ENV_VARS))
 def test_both_spellings_of_every_name_are_checked(name: str) -> None:
     """langchain-core renamed LANGCHAIN_* to LANGSMITH_* and still
-    honours the old names. Checking only the newer pair would return a
-    clean answer while tracing was on."""
+    honours the old names, so checking only the newer pair would return
+    a clean answer while tracing was on.
+
+    Parametrised over the constant rather than a copy of it: a name
+    added to config.py and not here would otherwise go untested while
+    this test kept passing. "x" is an unrecognised flag value, which
+    counts as enabled, so it reports for both categories.
+    """
     assert tracing_vars_set({name: "x"}) == [name]
 
 
@@ -487,12 +487,89 @@ def test_one_character_past_the_boundary_counts_as_set() -> None:
     assert tracing_vars_set({"LANGCHAIN_TRACING_V2": " x "}) == ["LANGCHAIN_TRACING_V2"]
 
 
-def test_a_falsy_looking_value_still_counts_as_set() -> None:
-    """Deliberate and stricter than langchain-core: disabling tracing by
-    VALUE rather than by unsetting is reported. Failing closed is the
-    direction to be wrong in when the alternative is exporting CV text.
+def test_a_flag_explicitly_set_to_false_is_not_reported() -> None:
+    """Inverted from what this check first did, and kept as a test so
+    the reasoning stays visible rather than becoming incidental.
+
+    The two categories are read differently because they answer
+    different questions. A FLAG carries a value that means something:
+    `false` is the documented way to turn tracing off, and it is what
+    appears in Compose files, CI configs and deployment templates
+    written by people being careful. Treating it as enabled made the
+    guard fire hardest on the environment it exists to bless -- the
+    process died claiming tracing was on, in front of a config line
+    saying it was off. A guard that is wrong in exactly the case it
+    approves gets deleted, and then there is no guard.
+
+    A CREDENTIAL carries no such meaning, so its presence alone is
+    still a signal. See the test below.
     """
-    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": "false"}) == ["LANGCHAIN_TRACING_V2"]
+    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": "false"}) == []
+
+
+def test_a_credential_is_still_reported_whatever_its_value_says() -> None:
+    """The other half of the split. There is no value LANGSMITH_API_KEY
+    could hold that makes it innocent in an environment that is not
+    tracing -- including the string "false"."""
+    assert tracing_vars_set({"LANGSMITH_API_KEY": "false"}) == ["LANGSMITH_API_KEY"]
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "False", " false ", "0", "off", "no"])
+def test_flag_values_that_mean_disabled(value: str) -> None:
+    """Each exact value, not one near it. Case-insensitive and stripped,
+    the way langchain-core reads them."""
+    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": value}) == []
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "True", " true ", "1", "on", "yes"])
+def test_flag_values_that_mean_enabled(value: str) -> None:
+    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": value}) == ["LANGCHAIN_TRACING_V2"]
+
+
+def test_an_unrecognised_flag_value_counts_as_enabled() -> None:
+    """Decided, not fallen out of the implementation.
+
+    Somebody set the variable intending something and we cannot tell
+    what. The two errors are not symmetric: a false positive costs a
+    crash with a readable message naming the variable, a false negative
+    costs CV-derived profile text exported to a third party with no
+    signal at all. Only the disabled values are enumerated in
+    config.py so this direction is structural rather than accidental.
+    """
+    assert tracing_vars_set({"LANGSMITH_TRACING": "maybe"}) == ["LANGSMITH_TRACING"]
+
+
+def test_the_older_langchain_tracing_flag_is_covered_too() -> None:
+    """langchain-core has carried three spellings of this flag."""
+    assert tracing_vars_set({"LANGCHAIN_TRACING": "true"}) == ["LANGCHAIN_TRACING"]
+    assert tracing_vars_set({"LANGCHAIN_TRACING": "false"}) == []
+
+
+def test_the_two_categories_are_disjoint_and_cover_every_name() -> None:
+    """A credential misplaced among the flags would be parsed for
+    truthiness, and under the fail-closed default an unrecognised key
+    value still reports -- so the misplacement would be masked by the
+    thing that makes this safe. This is the test that would notice.
+    """
+    flags = set(_TRACING_FLAG_VARS)
+    credentials = set(_TRACING_CREDENTIAL_VARS)
+    assert flags & credentials == set()
+    assert flags | credentials == set(_TRACING_ENV_VARS)
+    assert all("TRACING" in name for name in flags)
+    assert not any("TRACING" in name for name in credentials)
+
+
+def test_a_flags_value_never_reaches_the_error_message() -> None:
+    """The flag branch is the only place this module reads a value, and
+    a version that helpfully reported which value it rejected would be
+    the leak. Section 3: every incident so far came from a secret
+    handled incidentally while doing another job.
+    """
+    with pytest.raises(RuntimeError) as excinfo:
+        assert_tracing_disabled({"LANGCHAIN_TRACING_V2": "sensitive-looking-value"})
+    message = str(excinfo.value)
+    assert "LANGCHAIN_TRACING_V2" in message
+    assert "sensitive-looking-value" not in message
 
 
 def test_every_name_set_is_reported_not_just_the_first() -> None:
@@ -570,3 +647,94 @@ def test_build_graph_still_compiles_with_tracing_unset(monkeypatch) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
     assert build_graph() is not None
+
+
+# --- the skip breakdown survives the whole graph -------------------------
+
+
+def test_the_skip_breakdown_reaches_the_summary_end_to_end(monkeypatch) -> None:
+    """The work, not the plan: counters travel from run_scoring's return
+    value, through score_and_rank into state, into build_run_summary.
+
+    Forced with a stub because it cannot be forced live. On today's rows
+    every user is scorable, so the breakdown is 0/0/0 and a real run
+    would pass whether or not the keys were wired up. And --user-id 9999,
+    which forces the branch through scripts/score_jobs.py, does NOT work
+    here: resolve_targets reports users_with_embedded_cv 0, routing sends
+    the run straight to finalise with terminal_reason no_scorable_users,
+    and scoring never executes. The graph is built to stop before
+    scoring when nobody requested is scorable, so this path is
+    structurally unreachable live.
+    """
+
+    async def fake_targets(*, user_id=None):
+        return {
+            "requested_user_id": user_id,
+            "users_considered": 6,
+            "users_with_profile": 5,
+            "users_with_embedded_cv": 2,
+            "target_user_ids": [2, 3],
+        }
+
+    async def fake_scoring(*, user_id=None, dry_run=False):
+        return {
+            "status": "complete_no_qualifying",
+            "run_id": 11,
+            "users_considered": 6,
+            "users_skipped_no_cv": 4,
+            "users_skipped_no_profile": 1,
+            "users_skipped_no_active_cv": 1,
+            "users_skipped_cv_not_embedded": 2,
+            "users_scored": 2,
+            "jobs_scored": 98,
+            "pairs_scored": 196,
+            "notify_eligible": 0,
+        }
+
+    async def fake_enrichment(*, limit=None, dry_run=False):
+        return {"status": "complete", "attempted": 0, "candidates_considered": 97}
+
+    monkeypatch.setattr(nodes, "resolve_scoring_targets", fake_targets)
+    monkeypatch.setattr(nodes, "run_scoring", fake_scoring)
+    monkeypatch.setattr(nodes, "run_enrichment", fake_enrichment)
+
+    final = _run(
+        build_graph().ainvoke(
+            initial_state(dry_run=True, started_at="2026-09-03T00:00:00+00:00")
+        )
+    )
+    summary = build_run_summary(final)
+
+    assert summary["users_skipped_no_cv"] == 4
+    assert summary["users_skipped_no_profile"] == 1
+    assert summary["users_skipped_no_active_cv"] == 1
+    assert summary["users_skipped_cv_not_embedded"] == 2
+    assert summary["users_scored"] == 2
+
+
+def test_a_graph_run_that_never_scored_reports_no_skip_causes_at_all(
+    monkeypatch,
+) -> None:
+    """The run that stops at target resolution. Absent, not zero: the
+    scoring stage has no opinion about who was skipped because it never
+    ran."""
+
+    async def fake_targets(*, user_id=None):
+        return {
+            "requested_user_id": user_id,
+            "users_considered": 1,
+            "users_with_profile": 0,
+            "users_with_embedded_cv": 0,
+            "target_user_ids": [],
+        }
+
+    monkeypatch.setattr(nodes, "resolve_scoring_targets", fake_targets)
+
+    final = _run(
+        build_graph().ainvoke(initial_state(started_at="2026-09-03T00:00:00+00:00"))
+    )
+    summary = build_run_summary(final)
+
+    assert summary["terminal_reason"] == "no_scorable_users"
+    assert summary["users_skipped_no_cv"] is None
+    assert summary["users_skipped_cv_not_embedded"] is None

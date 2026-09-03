@@ -369,3 +369,97 @@ def test_a_skip_reason_is_never_merged_into_stages_attempted() -> None:
     )
     assert summary["stages_attempted"] == ["score_and_rank"]
     assert summary["stages_skipped"] == ["discover_jobs: dry_run"]
+
+
+# --- the skip breakdown reaches the summary ------------------------------
+#
+# run_agent.py runs unattended with nobody reading it, so a scheduled run
+# that silently stopped scoring somebody would emit a summary
+# indistinguishable from a healthy quiet day -- in the only artifact that
+# run produces.
+#
+# These are forced rather than observed. On today's rows every user is
+# scorable, so all three counters are 0 and a test against real data
+# would pass whether or not the keys were wired up at all.
+
+
+def test_the_three_skip_causes_reach_the_summary() -> None:
+    summary = build_run_summary(
+        _state_with(
+            scoring={
+                "status": "complete_no_qualifying",
+                "pairs_scored": 196,
+                "users_scored": 2,
+                "users_skipped_no_cv": 4,
+                "users_skipped_no_profile": 1,
+                "users_skipped_no_active_cv": 1,
+                "users_skipped_cv_not_embedded": 2,
+            },
+            finished_at="2026-09-03T00:05:00+00:00",
+        )
+    )
+    assert summary["users_skipped_no_cv"] == 4
+    assert summary["users_skipped_no_profile"] == 1
+    assert summary["users_skipped_no_active_cv"] == 1
+    assert summary["users_skipped_cv_not_embedded"] == 2
+
+
+def test_the_breakdown_in_the_summary_sums_to_its_total() -> None:
+    """The same arithmetic run_scoring's fourth funnel assertion
+    enforces, carried through to what an unattended run prints."""
+    summary = build_run_summary(
+        _state_with(
+            scoring={
+                "users_skipped_no_cv": 4,
+                "users_skipped_no_profile": 1,
+                "users_skipped_no_active_cv": 1,
+                "users_skipped_cv_not_embedded": 2,
+            },
+            finished_at="x",
+        )
+    )
+    assert summary["users_skipped_no_cv"] == (
+        summary["users_skipped_no_profile"]
+        + summary["users_skipped_no_active_cv"]
+        + summary["users_skipped_cv_not_embedded"]
+    )
+
+
+def test_a_run_that_never_scored_reports_the_skip_causes_as_absent_not_zero() -> None:
+    """A scoring stage that never ran has no opinion about how many
+    users were skipped. Defaulting to 0 would state one -- the same
+    mistake as defaulting an abstained signal column to 0.0, and the
+    same distinction jobs_enriched already makes after a dry run.
+    """
+    summary = build_run_summary(
+        _state_with(terminal_reason="no_scorable_users", finished_at="x")
+    )
+    for key in (
+        "users_skipped_no_cv",
+        "users_skipped_no_profile",
+        "users_skipped_no_active_cv",
+        "users_skipped_cv_not_embedded",
+    ):
+        assert summary[key] is None
+        assert summary[key] != 0
+
+
+def test_the_cause_is_visible_when_only_one_user_was_skipped() -> None:
+    """The shape a real incident takes: a run that scored most people
+    and quietly stopped scoring one. Without the breakdown the summary
+    says only that somebody was skipped, not whether running the
+    embedding pass would fix it."""
+    summary = build_run_summary(
+        _state_with(
+            scoring={
+                "users_scored": 2,
+                "users_skipped_no_cv": 1,
+                "users_skipped_no_profile": 0,
+                "users_skipped_no_active_cv": 0,
+                "users_skipped_cv_not_embedded": 1,
+            },
+            finished_at="x",
+        )
+    )
+    assert summary["users_skipped_cv_not_embedded"] == 1
+    assert summary["users_skipped_no_profile"] == 0

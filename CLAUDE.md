@@ -166,7 +166,7 @@ the end, and returns a dict of counters. `run_ingestion`,
 | | |
 |---|---|
 | Alembic head | `9a4e7c1d5b82` — 8 migrations |
-| Tests | 515 passing (471 before Day 10 Part 1) |
+| Tests | 541 passing (515 before Day 10 Part 2) |
 | Workflow | `app/workflows/` — 7 nodes, 3 conditional edges, no `agent_runs` table |
 | Jobs | 99, all embedded, 1 excluded (job 2) |
 | CV versions | 3 active, all embedded |
@@ -294,9 +294,8 @@ decisions, because each has a live alternative somebody will propose:
   data, and it reports variable NAMES only — two of them are
   credentials. Both spellings are checked, since `langchain-core`
   renamed `LANGCHAIN_*` to `LANGSMITH_*` and still honours the old ones.
-  Empty and whitespace-only values count as unset; anything else counts
-  as set, so `LANGCHAIN_TRACING_V2=false` is reported. Stricter than
-  `langchain-core`, deliberately.
+  Flags and credentials are read differently — see the Part 2 entry
+  below, which corrects what this bullet originally said.
 
 ### Open after Day 10 Part 1
 
@@ -311,6 +310,50 @@ decisions, because each has a live alternative somebody will propose:
   `build_run_summary()` reports `users_scored` but not the three skip
   counters, so a scheduled Day 10 run logs the total without the cause.
   `scripts/score_jobs.py` prints them; `scripts/run_agent.py` does not.
+
+### Closed by Day 10 Part 2
+
+- **Tracing flags and tracing credentials are read differently, and the
+  reason is not style.** A FLAG carries a value that means something:
+  `false` is the documented way to turn tracing off and it is what
+  appears in Compose files, CI configs and deployment templates written
+  by people being careful. The first version of this check treated any
+  non-empty value as enabled, so it fired hardest on the environment it
+  existed to bless — the process died claiming tracing was on, in front
+  of a config line saying it was off. **A guard that is wrong in exactly
+  the case it approves gets deleted by the next person under time
+  pressure, and then there is no guard at all.** Flags
+  (`LANGCHAIN_TRACING`, `LANGCHAIN_TRACING_V2`, `LANGSMITH_TRACING`) are
+  now parsed for truthiness, case-insensitive and stripped. Credentials
+  and destinations are unchanged: presence alone is the signal, because
+  no value makes `LANGSMITH_API_KEY` innocent in an environment that is
+  not tracing.
+- **An unrecognised flag value counts as ENABLED.** Only the disabled
+  values are enumerated in `config.py`, so the fail-closed direction is
+  structural rather than accidental — listing the enabled ones instead
+  would make an unknown value fall through to "not enabled" by accident.
+  A false positive costs a crash naming a variable; a false negative
+  costs CV text exported with no signal.
+- **The flag branch reads values and must never emit one.** It is the
+  only place in `config.py` that looks at a value; the value is consumed
+  by `_flag_is_enabled()` and only the NAME is returned. Tested.
+- **The skip breakdown reaches `build_run_summary()`.** No plumbing
+  change was needed: `score_and_rank` already stores `run_scoring`'s
+  whole dict as `state["scoring"]`. Absent stays `None`, never `0` —
+  a scoring stage that never ran has no opinion about who was skipped.
+
+### Open after Day 10 Part 2
+
+- **The `.env` leak is still not remediated.** Human task, still has a
+  clock on it.
+- **The workflow skip breakdown cannot be forced live.** `--user-id
+  9999` exercises it through `scripts/score_jobs.py`, but not through
+  `scripts/run_agent.py`: `resolve_targets` reports
+  `users_with_embedded_cv 0` and routing stops the run at `finalise`
+  before scoring executes. That is the graph working as designed. It
+  means the breakdown's end-to-end path is covered by a stubbed test
+  only, and will stay that way until a real user is unscorable while
+  another is not.
 
 ---
 
