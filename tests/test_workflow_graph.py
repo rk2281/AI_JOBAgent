@@ -32,6 +32,8 @@ import ast
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from app.workflows import nodes
 from app.workflows.graph import (
     NODE_NAMES,
@@ -45,6 +47,7 @@ from app.workflows.routing import (
     ROUTE_AFTER_TARGETS,
     ROUTE_NOTIFICATION,
 )
+from app.core.config import assert_tracing_disabled, tracing_vars_set
 from app.workflows.state import initial_state
 
 _WORKFLOWS_DIR = Path(__file__).resolve().parents[1] / "app" / "workflows"
@@ -428,3 +431,142 @@ def test_the_helper_catches_what_the_layering_test_looks_for() -> None:
     ]
     assert found == ["sqlalchemy"]
 
+
+# --- the tracer fails closed ---------------------------------------------
+#
+# langsmith arrives as a langchain-core dependency and activates from the
+# process environment alone. Searching this repository proves it does not
+# set those variables; it proves nothing about the machine the graph runs
+# on, and that is the case that matters once Day 10 runs it unattended.
+# An enabled tracer ships graph state -- CV-derived profile text and job
+# descriptions -- to a third party.
+#
+# The first group drives the pure function against dicts. The last two
+# drive build_graph() through a real process environment: the work, not
+# the plan.
+
+
+def test_a_clean_environment_reports_nothing() -> None:
+    assert tracing_vars_set({}) == []
+    assert tracing_vars_set({"PATH": "/usr/bin", "HOME": "/home/x"}) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "LANGCHAIN_TRACING_V2",
+        "LANGSMITH_TRACING",
+        "LANGCHAIN_API_KEY",
+        "LANGSMITH_API_KEY",
+        "LANGCHAIN_ENDPOINT",
+        "LANGSMITH_ENDPOINT",
+        "LANGCHAIN_PROJECT",
+        "LANGSMITH_PROJECT",
+    ],
+)
+def test_both_spellings_of_every_name_are_checked(name: str) -> None:
+    """langchain-core renamed LANGCHAIN_* to LANGSMITH_* and still
+    honours the old names. Checking only the newer pair would return a
+    clean answer while tracing was on."""
+    assert tracing_vars_set({name: "x"}) == [name]
+
+
+def test_an_empty_value_counts_as_unset() -> None:
+    """The exact boundary: empty string, not merely a short one. This is
+    how langchain-core reads them."""
+    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": ""}) == []
+
+
+def test_a_whitespace_only_value_counts_as_unset() -> None:
+    assert tracing_vars_set({"LANGSMITH_API_KEY": "   "}) == []
+    assert tracing_vars_set({"LANGSMITH_API_KEY": "\t\n"}) == []
+
+
+def test_one_character_past_the_boundary_counts_as_set() -> None:
+    """The value either side of "empty after stripping"."""
+    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": " x "}) == ["LANGCHAIN_TRACING_V2"]
+
+
+def test_a_falsy_looking_value_still_counts_as_set() -> None:
+    """Deliberate and stricter than langchain-core: disabling tracing by
+    VALUE rather than by unsetting is reported. Failing closed is the
+    direction to be wrong in when the alternative is exporting CV text.
+    """
+    assert tracing_vars_set({"LANGCHAIN_TRACING_V2": "false"}) == ["LANGCHAIN_TRACING_V2"]
+
+
+def test_every_name_set_is_reported_not_just_the_first() -> None:
+    """A diagnostic that stopped at the first match would send somebody
+    to unset one variable and leave the tracer running on another."""
+    found = tracing_vars_set(
+        {
+            "LANGCHAIN_TRACING_V2": "true",
+            "LANGSMITH_API_KEY": "ls-secret",
+            "LANGSMITH_PROJECT": "p",
+        }
+    )
+    assert found == ["LANGCHAIN_TRACING_V2", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT"]
+
+
+def test_the_output_is_sorted_so_the_message_is_reproducible() -> None:
+    found = tracing_vars_set({"LANGSMITH_TRACING": "1", "LANGCHAIN_API_KEY": "k"})
+    assert found == sorted(found)
+
+
+def test_the_report_names_variables_and_never_values() -> None:
+    """Two of these names are credentials. CLAUDE.md section 3: nine leak
+    incidents, none from printing .env, every one from a secret handled
+    incidentally. A diagnostic that echoed what it found would be the
+    tenth."""
+    found = tracing_vars_set({"LANGSMITH_API_KEY": "ls-super-secret-value"})
+    assert found == ["LANGSMITH_API_KEY"]
+    assert "ls-super-secret-value" not in " ".join(found)
+
+
+def test_assert_tracing_disabled_is_quiet_on_a_clean_environment() -> None:
+    assert_tracing_disabled({})
+
+
+def test_assert_tracing_disabled_raises_rather_than_warning() -> None:
+    """It raises because a warning about telemetry is read after the run
+    that already sent the data."""
+    with pytest.raises(RuntimeError):
+        assert_tracing_disabled({"LANGCHAIN_TRACING_V2": "true"})
+
+
+def test_build_graph_refuses_while_tracing_is_enabled(monkeypatch) -> None:
+    """The work, not the plan: a real process environment through the
+    real call, not a dict through a pure function."""
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "true")
+    with pytest.raises(RuntimeError) as excinfo:
+        build_graph()
+    assert "LANGCHAIN_TRACING_V2" in str(excinfo.value)
+
+
+def test_build_graph_names_the_variable_and_not_its_value(monkeypatch) -> None:
+    """A planted key must appear by NAME in the message and its value
+    must not appear anywhere in it."""
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-pt-planted-secret-do-not-print")
+    with pytest.raises(RuntimeError) as excinfo:
+        build_graph()
+
+    message = str(excinfo.value)
+    assert "LANGSMITH_API_KEY" in message
+    assert "lsv2-pt-planted-secret-do-not-print" not in message
+
+
+def test_build_graph_still_compiles_with_tracing_unset(monkeypatch) -> None:
+    """The check must not be a permanent refusal. Unset every name and
+    the graph builds as before."""
+    for name in (
+        "LANGCHAIN_TRACING_V2",
+        "LANGSMITH_TRACING",
+        "LANGCHAIN_API_KEY",
+        "LANGSMITH_API_KEY",
+        "LANGCHAIN_ENDPOINT",
+        "LANGSMITH_ENDPOINT",
+        "LANGCHAIN_PROJECT",
+        "LANGSMITH_PROJECT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert build_graph() is not None

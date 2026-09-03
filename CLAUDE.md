@@ -47,6 +47,7 @@ do in this repository, because none of these produce a failure when
 | `jobs_enriched` prints `None` after a dry run | should be `0` | the dry-run path returns before computing it — **absent, not zero**, same distinction as the NULL signal columns |
 | coverage floors 0.45 and 0.40 give the same result as 0.50 | the grid is broken | `weight_covered` has three observed values, so the floor is a step function, not a dial (Day 9 note §9.2) |
 | `app/workflows/` imports no repository | inconsistent with services | deliberate — `resolve_targets` calls a service so the rule needs no exception, and an exception is a hole to grow into |
+| `users_skipped_no_cv` counts three different things | the name is wrong, rename it | deliberate — renaming breaks comparison against every `scoring_runs` row written before the breakdown existed. `users_skipped_no_profile` / `_no_active_cv` / `_cv_not_embedded` say which cause applied; only the third is fixable by running the embedding pass |
 
 **This list is a reconstruction and is known to be incomplete.** The
 original list lived in `prompts/day8_open_issues.md`, which was absent
@@ -165,7 +166,7 @@ the end, and returns a dict of counters. `run_ingestion`,
 | | |
 |---|---|
 | Alembic head | `9a4e7c1d5b82` — 8 migrations |
-| Tests | 471 passing |
+| Tests | 515 passing (471 before Day 10 Part 1) |
 | Workflow | `app/workflows/` — 7 nodes, 3 conditional edges, no `agent_runs` table |
 | Jobs | 99, all embedded, 1 excluded (job 2) |
 | CV versions | 3 active, all embedded |
@@ -252,6 +253,64 @@ See `docs/Day_9_Design_Note.md` and `docs/Day_9_progress.md`.
   searching source, not by reading `.env`. Confirm none is set in the
   deployment environment before Day 10 runs the graph unattended: an
   enabled tracer would ship graph state to a third party.
+
+### Closed by Day 10 Part 1
+
+All three "Open after Day 9" items above are closed. The settled
+decisions, because each has a live alternative somebody will propose:
+
+- **`is_scorable_user` was NOT split**, and must not be. Its docstring
+  says so and the docstring is right: the gate stays a function of
+  exactly two booleans, and `classify_skip_reason()` is reporting
+  layered on top, reached only after the gate has returned `False`. That
+  ordering is what makes the breakdown structurally incapable of
+  changing who gets scored. It asserts rather than returning a fallback
+  when handed a scorable user — a plausible string there would let the
+  counters sum and the funnel balance while a scored user was reported
+  as skipped.
+- **`users_skipped_no_cv` keeps its name.** It counts three things and
+  is literally accurate for only one of them, and it stays anyway:
+  renaming it would make every `scoring_runs` row written before the
+  breakdown unreadable against every row after. A column meaning one
+  thing up to a date and another afterwards is worse than a column with
+  an imprecise name. The three new counters say which cause applied.
+- **The aggregate query in `scripts/scorable_targets_check.py` was
+  rejected** as the source of the breakdown, though it is cheaper. It
+  observes the PLAN — one count read around the loop — where the loop
+  observes the WORK, and reusing it would make that script share code
+  with the thing it cross-checks, which
+  `test_scorable_targets_check_does_not_reference_the_shared_predicate`
+  exists to prevent. The breakdown costs one extra query on the skipped
+  branch only: a run that skips nobody pays nothing.
+- **`httpcore2`, `httpx2` and `truststore` are transitive, not loose
+  pins**, and are not removable while `langgraph` is a dependency:
+  `langgraph -> langchain-core -> langsmith -> httpx2 -> httpcore2 /
+  truststore`. Verified with `pip show`; the chain is recorded above the
+  pin in `requirements.txt`. `httpx2` is present BECAUSE the telemetry
+  client is, so this was one issue with the item below, not two.
+- **Tracing fails closed.** `assert_tracing_disabled()` is the first
+  statement of `build_graph()`. It raises rather than warns, because a
+  warning about telemetry is read after the run that already sent the
+  data, and it reports variable NAMES only — two of them are
+  credentials. Both spellings are checked, since `langchain-core`
+  renamed `LANGCHAIN_*` to `LANGSMITH_*` and still honours the old ones.
+  Empty and whitespace-only values count as unset; anything else counts
+  as set, so `LANGCHAIN_TRACING_V2=false` is reported. Stricter than
+  `langchain-core`, deliberately.
+
+### Open after Day 10 Part 1
+
+- **The `.env` leak is not remediated.** `.env` was present in a shared
+  archive, so `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ADZUNA_APP_KEY`
+  and `DATABASE_URL` have left the machine. Rotation is a human task and
+  has not been done. Incident ten, and like the nine before it, it did
+  not come from printing `.env`. `scripts/pack.ps1` needs no change —
+  its `$ForbiddenPatterns` already covers `.env` and fails closed; the
+  archive was not built with it.
+- **The skip breakdown is not in the workflow summary.**
+  `build_run_summary()` reports `users_scored` but not the three skip
+  counters, so a scheduled Day 10 run logs the total without the cause.
+  `scripts/score_jobs.py` prints them; `scripts/run_agent.py` does not.
 
 ---
 

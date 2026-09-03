@@ -1,3 +1,5 @@
+import os
+from collections.abc import Mapping
 from functools import lru_cache
 
 from pydantic import model_validator
@@ -624,3 +626,74 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+# --- LangSmith telemetry (Day 10) ----------------------------------------
+#
+# langsmith arrives as a langchain-core dependency and activates from the
+# PROCESS ENVIRONMENT ALONE. Nothing in this repository imports it, sets
+# these variables, or declares a Settings field for them -- and none of
+# that is evidence about the machine the graph runs on. Once Day 10 runs
+# the graph unattended, an enabled tracer ships graph state to a third
+# party, and graph state is CV-derived profile text and job descriptions.
+#
+# Both spellings are checked. langchain-core renamed LANGCHAIN_* to
+# LANGSMITH_* and still honours the old names, so checking only the newer
+# pair would return a clean answer while tracing was on.
+_TRACING_ENV_VARS = (
+    "LANGCHAIN_TRACING_V2",
+    "LANGSMITH_TRACING",
+    "LANGCHAIN_API_KEY",
+    "LANGSMITH_API_KEY",
+    "LANGCHAIN_ENDPOINT",
+    "LANGSMITH_ENDPOINT",
+    "LANGCHAIN_PROJECT",
+    "LANGSMITH_PROJECT",
+)
+
+
+def tracing_vars_set(environ: Mapping[str, str]) -> list[str]:
+    """Which tracing variables are set in `environ`. NAMES ONLY.
+
+    Never returns, logs or formats a VALUE. Two of the names above are
+    API keys, and CLAUDE.md section 3 records nine leak incidents, none
+    of which came from printing `.env` -- every one came from something
+    handling a secret incidentally while doing another job. A diagnostic
+    that echoed what it found would be the tenth.
+
+    Takes the environment as an argument rather than reading os.environ
+    itself, so it can be driven from a dict without touching the
+    process. Output is sorted, so the message a failure prints is the
+    same on every machine.
+
+    An empty or whitespace-only value counts as UNSET, because that is
+    how langchain-core reads them. Note the consequence, which is
+    deliberate: any other value counts as set, so LANGCHAIN_TRACING_V2
+    set to "false" is reported. That is stricter than langchain-core and
+    it fails closed -- somebody disabling tracing by value rather than
+    by unsetting gets an error they can act on, which is the direction
+    to be wrong in when the alternative is silently exporting CV text.
+    """
+    return sorted(name for name in _TRACING_ENV_VARS if (environ.get(name) or "").strip())
+
+
+def assert_tracing_disabled(environ: Mapping[str, str] | None = None) -> None:
+    """Refuse to build a graph while a tracer could be listening.
+
+    Raises rather than warning, and that is the entire point. A warning
+    about telemetry is read after the run that already sent the data;
+    there is no such thing as retracting it. Nothing downstream of this
+    is worth the export.
+
+    The message names the variables and never their values.
+    """
+    found = tracing_vars_set(os.environ if environ is None else environ)
+    if found:
+        raise RuntimeError(
+            "LangSmith tracing appears to be enabled: "
+            + ", ".join(found)
+            + ". The workflow refuses to run while a tracer could receive "
+            "CV-derived profile text and job descriptions. Unset these "
+            "variables in the environment. (Names only are shown here; "
+            "two of them are credentials.)"
+        )

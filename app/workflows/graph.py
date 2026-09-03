@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
+from app.core.config import assert_tracing_disabled
 from app.workflows.nodes import (
     decide_notification,
     discover_jobs,
@@ -93,7 +94,17 @@ def build_graph():
     deliberately not conditional. Every one of those nodes decides for
     itself whether to work, and returns a skip record when it does not,
     so the sequence stays fixed and observable.
+
+    The tracing check is the FIRST statement, before a StateGraph
+    exists. langsmith arrives with langchain-core and activates from the
+    process environment alone, so the graph must refuse to be built at
+    all rather than be built and then run with a tracer attached --
+    there is no point at which a partially assembled graph is safer than
+    no graph. It raises rather than warns: a warning about telemetry is
+    read after the run that already exported the data.
     """
+    assert_tracing_disabled()
+
     graph = StateGraph(AgentState)
 
     graph.add_node("resolve_targets", resolve_targets)

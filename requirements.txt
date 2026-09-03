@@ -15,6 +15,29 @@ google-genai==2.20.0
 greenlet==3.5.5
 h11==0.16.0
 httpcore==1.0.9
+# httpcore2, httpx2 and truststore are TRANSITIVE, not loose pins:
+#   langgraph -> langchain-core -> langsmith -> httpx2 -> httpcore2
+#                                                      -> truststore
+# and httpcore2 -> truststore as well (pip show: httpx2 Required-by
+# langsmith; truststore Required-by httpcore2, httpx2). starlette
+# declares httpx2>=2.0.0 under its "full" extra, which is a second path
+# in, but that path is LATENT, not active: the extra is not installed
+# here -- pip show starlette requires only anyio and typing-extensions --
+# so langsmith is today the only reason these three are present.
+# Installing starlette[full] later would make that path active, and
+# these three would then survive removing langgraph. Worth knowing
+# before concluding from this comment that they can be dropped with it.
+#
+# Two consequences worth knowing. httpx2 is here BECAUSE the telemetry
+# client is; see app/core/config.py assert_tracing_disabled(), which is
+# why the workflow refuses to build while a tracer could be listening.
+# And httpcore2 requires truststore, so TLS on the httpx2 path verifies
+# against the OS trust store rather than certifi. No first-party traffic
+# uses that path: google-genai, python-telegram-bot and langgraph-sdk
+# all require plain httpx 0.28.1, and no module in this repository
+# imports httpx2, httpcore2 or truststore.
+#
+# They are not removable while langgraph is a dependency.
 httpcore2==2.12.0
 httptools==0.8.0
 httpx==0.28.1

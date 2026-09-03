@@ -294,3 +294,118 @@ mistake as defaulting an abstained signal.
 4. **Everything Day 8 left open remains open**: the abstention
    asymmetry, the `||` multi-company field, the possibly-incomplete
    agency list, Adzuna credential rotation, job 81's attempts ceiling.
+
+---
+
+## Part 8. Status of Part 7, after the Day 10 review
+
+The text of Part 7 above is left exactly as written. A record that is
+edited to match what turned out to be true stops being a record. What
+follows is what a review of the Day 9 archive established.
+
+### Issues 2 and 3 were one issue, and it is closed
+
+Part 7 listed `httpcore2` / `httpx2` / `truststore` as unverified pins
+of unknown origin (issue 2), and `langsmith` as a separate telemetry
+concern (issue 3). **They are the same issue.** Verified with `pip show`:
+
+```
+langgraph -> langchain-core -> langsmith -> httpx2 -> httpcore2
+                                                   -> truststore
+```
+
+`httpx2` reports `Required-by: langsmith`; `truststore` reports
+`Required-by: httpcore2, httpx2`. So the three packages are present
+*because* the telemetry client is. They are transitive dependencies, not
+loose pins, and they are not removable while `langgraph` is a
+dependency.
+
+Two corrections to how this was first described to me. `truststore` is
+required by **both** `httpcore2` and `httpx2`, not by `httpcore2` alone.
+And `starlette[full]` does declare `httpx2>=2.0.0` as a second path in,
+but that extra is **not installed here** — `pip show starlette` requires
+only `anyio` and `typing-extensions` — so `langsmith` is today the only
+actual path.
+
+Consequence worth carrying: `httpcore2` requires `truststore`, so TLS on
+the `httpx2` path verifies against the OS trust store rather than
+`certifi`. **No first-party traffic uses that path.** `google-genai`,
+`python-telegram-bot` and `langgraph-sdk` all require plain `httpx`
+0.28.1, and no module in this repository imports `httpx2`, `httpcore2`
+or `truststore`. Recorded as a comment above the pin.
+
+The telemetry half is closed by `assert_tracing_disabled()` in
+`app/core/config.py`, called as the first statement of `build_graph()`.
+Part 7 said searching the source proves this repo does not enable
+tracing; that was true and it was not enough, because `langsmith`
+activates from the process environment alone and the deployment host is
+not this repository. The check now raises rather than warns — a warning
+about telemetry is read after the run that already sent the data — and
+it reports variable **names only**, because two of them are credentials.
+
+### Issue 1 is closed
+
+`users_skipped_no_cv` now has a breakdown:
+`users_skipped_no_profile`, `users_skipped_no_active_cv`,
+`users_skipped_cv_not_embedded`. Only the third is fixable by running
+the embedding pass, which is the distinction the single counter could
+not express.
+
+`is_scorable_user` is **unchanged**. Its docstring said not to split it
+and that instruction was correct: the gate stays a function of exactly
+two booleans, and `classify_skip_reason()` is reporting layered on top,
+called only after the gate has already returned `False`. It asserts
+rather than returning a fallback if handed a scorable user, because a
+plausible-looking string there would let the counters sum and the funnel
+balance while one scored user was reported as skipped.
+
+The counter keeps its name. Renaming it would make every `scoring_runs`
+row written before the change unreadable against every row written
+after, and the name is imprecise for only one of the three cases it
+counts — the breakdown now says which.
+
+A fourth funnel assertion holds the three to sum to
+`users_skipped_no_cv`. It differs from the two oldest assertions in the
+way that matters: all four counters increment inside the loop, on the
+same branch, on the same pass, so it cannot balance while the loop
+misattributes a cause.
+
+**Exercised against real data**, not only in tests:
+`python -m scripts.score_jobs --dry-run --user-id 9999` (a user id with
+no profile row) reported `users_skipped_no_cv 1` broken down as
+`no_profile 1`, with the fourth assertion holding non-trivially at
+`1 == 1 + 0 + 0`. The ordinary run is unchanged: 3 users considered, 0
+skipped, 3 scored, 294 pairs.
+
+Worth writing down rather than rediscovering: `--user-id 9999` works as
+a way of forcing that branch because **the flag does not check that the
+user exists**. `select_target_user_ids()` returns `[user_id]` verbatim
+when one is given, without consulting `profiles` — the profile lookup
+happens inside the loop, which is exactly where the skip is classified.
+That is harmless and useful: it is the only way to exercise the skip
+path against real data while every real user is scorable.
+
+### One thing added beyond the change as specified
+
+`scripts/score_jobs.py` prints an explicit list of counters, so the
+three new ones would have existed in the returned dict and in the
+`scoring_runs` row while being invisible in the only tool a person reads
+a scoring run with. Three print lines were added under
+`users_skipped_no_cv`. Without them the change would have satisfied its
+own tests and done nothing observable — §0.
+
+### The archive leak
+
+`.env` was present in the archive that was reviewed, so
+`GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `ADZUNA_APP_KEY` and
+`DATABASE_URL` have left the machine. **Rotation is a human task and is
+not done.** It is the tenth incident, and like the nine before it, it
+did not come from printing `.env`.
+
+`scripts/pack.ps1` needs no change and was not changed. Its
+`$ForbiddenPatterns` already covers `.env`, `.git/`, `storage/`, `*.zip`
+and `*.pdf`, and it fails closed on all of them. **The archive was
+simply not built with it** — which is the same failure Part 1 of this
+document describes from the other direction: `pack.ps1` cannot protect
+an archive that was made by some other means, just as it cannot include
+a file that was never committed.
