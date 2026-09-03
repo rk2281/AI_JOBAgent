@@ -42,6 +42,11 @@ do in this repository, because none of these produce a failure when
 | company matching is exact, not substring | the `\|\|` multi-company field is being missed | deliberate — see Day 8 record §3.2 |
 | `list_needing_enrichment()` does not filter `is_excluded` | wasted API quota on job 2 | deliberate — having skills and being scorable are different questions (§8.4) |
 | dry-run prints `missing skills 91` and `would enrich 97` | the numbers should agree | they count different things; both correct (§8.5) |
+| both notification branches point at `finalise` | a stub | deliberate — the routing rule is real and tested in both directions; Day 11 changes one entry of `NOTIFICATION_PATH_MAP` |
+| `stages_persisted` is `(none)` on a dry run | persistence is broken | dry-run scoring and dry-run enrichment write nothing by design; `computation_performed` is the field that says work happened |
+| `jobs_enriched` prints `None` after a dry run | should be `0` | the dry-run path returns before computing it — **absent, not zero**, same distinction as the NULL signal columns |
+| coverage floors 0.45 and 0.40 give the same result as 0.50 | the grid is broken | `weight_covered` has three observed values, so the floor is a step function, not a dial (Day 9 note §9.2) |
+| `app/workflows/` imports no repository | inconsistent with services | deliberate — `resolve_targets` calls a service so the rule needs no exception, and an exception is a hole to grow into |
 
 **This list is a reconstruction and is known to be incomplete.** The
 original list lived in `prompts/day8_open_issues.md`, which was absent
@@ -160,7 +165,8 @@ the end, and returns a dict of counters. `run_ingestion`,
 | | |
 |---|---|
 | Alembic head | `9a4e7c1d5b82` — 8 migrations |
-| Tests | 363 passing |
+| Tests | 471 passing |
+| Workflow | `app/workflows/` — 7 nodes, 3 conditional edges, no `agent_runs` table |
 | Jobs | 99, all embedded, 1 excluded (job 2) |
 | CV versions | 3 active, all embedded |
 | Enriched jobs | 5, of which 2 produced skills |
@@ -207,17 +213,45 @@ to 1.0. Changing any weight requires bumping `weights_version`.
   would take affected pairs from 29 to 35. Undecided.
 - **`--top` prints the `title` header twice.** Cosmetic.
 
-### Day 9 decisions still open
+### Day 9 decisions, settled
 
-1. `langgraph` import location — `app/agent/` or behind a wrapper in
-   `app/integrations/`?
-2. Is `embed_jobs` a Day 9 node? It is not in the plan's Day 9 row, but
-   without it an ingest-then-score run scores none of the new jobs and
-   the funnel balances perfectly while doing it.
-3. `agent_runs` table now (9th migration) or on Day 10?
-4. Build the notify-branch reachability probe, or skip it?
+1. **`langgraph` lives in `app/workflows/`**, imported by exactly one
+   module (`graph.py`), asserted by a test. Not `app/integrations/` —
+   that directory is for anything making a network call on someone
+   else's credentials, which langgraph does not. Not `app/agent/` —
+   `CODEBASE_GUIDE.md` already reserved `app/workflows/` for scheduled
+   matching runs.
+2. **`embed_jobs` is a node**, though absent from the plan's Day 9 row.
+   A test walks every path from `discover_jobs` to `score_and_rank` and
+   fails if any misses it. Plan gap, not a code gap.
+3. **No `agent_runs` table.** `build_run_summary(state) -> dict` is the
+   seam: pure, separately tested, returning the exact fields the row
+   would hold. Day 10 persists a dict that already exists.
+4. **The probe was built and run.** Prediction (1–4) was correct: 2.
+   See `docs/Day_9_Design_Note.md` §9 — and do not change a threshold
+   on the strength of it.
 
-See `docs/Day_9_Design_Note.md`.
+See `docs/Day_9_Design_Note.md` and `docs/Day_9_progress.md`.
+
+### Open after Day 9
+
+- **`users_skipped_no_cv` conflates two states.** "No active CV version"
+  and "active version not embedded" are indistinguishable to every
+  caller, and only the second is fixable by running the embedding pass.
+  Pre-existing. Deliberately not fixed inside the graph — that would
+  make the graph's definition of scorable differ from scoring's.
+  `scripts/scorable_targets_check.py` prints all four states, which is
+  currently the only place the distinction is visible. **Needs a
+  decision.**
+- **`httpcore2`, `httpx2` and `truststore`** were written into
+  `requirements.txt` for the first time on Day 9. They were already
+  installed and are not Day 9 additions, but nothing has verified them.
+- **`langsmith` ships with `langchain-core`.** It is a telemetry client
+  that activates on `LANGCHAIN_TRACING_V2` / `LANGSMITH_*` environment
+  variables. Nothing in this repository sets or reads them — verified by
+  searching source, not by reading `.env`. Confirm none is set in the
+  deployment environment before Day 10 runs the graph unattended: an
+  enabled tracer would ship graph state to a third party.
 
 ---
 
