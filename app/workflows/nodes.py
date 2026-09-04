@@ -1,4 +1,4 @@
-"""The seven nodes. Each one calls exactly one thing and records what it did.
+"""The eight nodes. Each one calls exactly one thing and records what it did.
 
 A node is a unit of ORCHESTRATION, not a unit of computation. Nothing
 here scores, matches, ranks, validates or deduplicates -- every one of
@@ -47,6 +47,7 @@ from app.services.job_embedding import run_job_embedding
 from app.services.job_enrichment import run_enrichment
 from app.services.job_ingestion import run_ingestion
 from app.services.job_scoring import resolve_scoring_targets, run_scoring
+from app.services.notification_delivery import run_notification_delivery
 from app.workflows.routing import SCORING_TERMINAL_STATUSES, route_notification
 from app.workflows.state import (
     STATUS_NO_SCORABLE_USERS,
@@ -56,6 +57,7 @@ from app.workflows.state import (
     normalise_embedding_result,
     normalise_enrichment_result,
     normalise_ingestion_result,
+    notification_computed,
     scoring_computed,
 )
 
@@ -256,6 +258,64 @@ async def decide_notification(state: dict[str, Any]) -> dict[str, Any]:
         "notify_branch": branch,
         "stages_attempted": ["decide_notification"],
     }
+
+
+async def notify(state: dict[str, Any]) -> dict[str, Any]:
+    """Send the messages. The branch that had never executed until Day 11.
+
+    Reached only via NOTIFICATION_PATH_MAP["notify"], which is entered
+    only when route_notification() saw notify_eligible >= 1. Day 9 wired
+    that edge to `finalise` and tested it in both directions precisely so
+    that the first time it carried a real message it would be a
+    connection already proven, not a branch discovered at 3am.
+
+    IT APPLIES NO GATE, AND IT DOES NOT RE-COUNT ONE
+
+    run_notification_delivery() selects with is_notify_eligible() -- the
+    same function run_scoring used to produce the count that routed us
+    here. This node neither re-derives that rule nor second-guesses the
+    routing: a node is a unit of ORCHESTRATION, and a second copy of the
+    notification rule living in app/workflows/ would be a second thing to
+    keep in step with the first.
+
+    NO REPOSITORY IMPORT, AND THAT IS WHY THIS CALLS A SERVICE
+
+    Delivery is entirely database work -- read recommendations, write
+    attempt rows, update statuses -- and app/workflows/ imports no
+    repository (CLAUDE.md section 1). The rule needs no exception here
+    for the same reason resolve_targets needed none: the work lives
+    behind a service that owns its own transactions and returns a dict of
+    counters. An exception is a hole to grow into.
+
+    UNDER --dry-run IT STILL SELECTS AND STILL SENDS NOTHING
+
+    run_notification_delivery(dry_run=True) applies the gate, reports how
+    many rows it chose, and returns before the first attempt row and the
+    first message. So a rehearsal answers "who would be messaged tonight"
+    -- which is the question worth rehearsing -- while `stages_persisted`
+    stays empty and nobody's phone lights up.
+    """
+    result = await run_notification_delivery(
+        user_id=state.get("user_id"),
+        dry_run=bool(state.get("dry_run")),
+    )
+
+    update: dict[str, Any] = {
+        "notification": result,
+        "stages_attempted": ["notify"],
+    }
+    if state.get("dry_run"):
+        update["stages_skipped"] = ["notify: dry_run"]
+    if notification_computed(result):
+        update["stages_computed"] = ["notify"]
+    # Persistence means a durable row was written, and an attempt row IS
+    # one -- including a failed attempt. `attempted`, not `sent`: a run
+    # that tried three times and delivered nothing still wrote three rows
+    # that a human can read tomorrow, and reporting no persistence for it
+    # would describe those rows as not existing.
+    if not state.get("dry_run") and int(result.get("attempted") or 0) > 0:
+        update["stages_persisted"] = ["notify"]
+    return update
 
 
 async def finalise(state: dict[str, Any]) -> dict[str, Any]:

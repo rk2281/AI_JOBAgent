@@ -13,6 +13,9 @@ from app.db.models.ingestion import IngestionReject, IngestionRun, IngestionStat
 from app.db.models.job import Job, JobSkill
 from app.db.models.profile import Profile
 from app.db.models.recommendation import (
+    NOTIFICATION_TRIGGER_SOURCES,
+    TRIGGER_SOURCE_MANUAL_TEST,
+    TRIGGER_SOURCE_SCHEDULED,
     FeedbackAction,
     Notification,
     NotificationStatus,
@@ -24,6 +27,9 @@ from app.db.models.skill import Skill
 from app.db.models.user import OnboardingState, User, UserPreference
 
 __all__ = [
+    "NOTIFICATION_TRIGGER_SOURCES",
+    "TRIGGER_SOURCE_MANUAL_TEST",
+    "TRIGGER_SOURCE_SCHEDULED",
     "AgentRun",
     "Base",
     "CV",

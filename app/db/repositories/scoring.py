@@ -15,6 +15,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.job import Job
 from app.db.models.recommendation import Recommendation
 from app.db.models.scoring import ScoringRun, ScoringStatus
 
@@ -174,6 +175,39 @@ class RecommendationRepository:
             .limit(limit)
         )
         return list(result.scalars().all())
+
+    async def top_with_jobs_for_user(
+        self, user_id: int, limit: int
+    ) -> list[tuple[Recommendation, Job]]:
+        """Top rows joined to the job each one is about.
+
+        Notification needs both halves at once -- the score and gate
+        inputs from the recommendation, the title, company and URL from
+        the job -- and fetching them separately would either be N+1
+        queries or a lazy load on a row whose session has closed.
+
+        Filters `is_active` and `is_excluded` on the JOB, which
+        top_for_user() does not. The difference is what the caller does
+        with the answer: top_for_user() reports a stored ranking and a
+        retired job's last known score is part of that history, while
+        this one is about to message a person, and sending somebody a
+        vacancy that closed three weeks ago is worse than sending
+        nothing. An INNER JOIN, so a recommendation whose job row has
+        been deleted outright drops out here rather than arriving as a
+        None nobody checked.
+        """
+        result = await self._session.execute(
+            select(Recommendation, Job)
+            .join(Job, Job.id == Recommendation.job_id)
+            .where(
+                Recommendation.user_id == user_id,
+                Job.is_active.is_(True),
+                Job.is_excluded.is_(False),
+            )
+            .order_by(Recommendation.final_score.desc(), Recommendation.job_id.asc())
+            .limit(limit)
+        )
+        return [(row[0], row[1]) for row in result.all()]
 
     async def bottom_for_user(self, user_id: int, limit: int) -> list[Recommendation]:
         result = await self._session.execute(

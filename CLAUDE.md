@@ -32,23 +32,27 @@ being explicitly asked is the single most damaging thing an agent can
 do in this repository, because none of these produce a failure when
 "fixed" — they produce a plausible-looking success.
 
-| Observation | Looks like | Actually |
-|---|---|---|
-| `abstain_experience = 98 / 98` | extraction is broken | source data ceiling — descriptions truncated at Adzuna's 500-char cap; only 37 of 99 mention years at all |
-| `notify_eligible = 0` | the gate is broken | the gate is working: `weight_covered` 0.50 < `min_weight_covered_to_notify` 0.55 |
-| signal columns on `recommendations` are NULL | missing data, default them to `0.0` | **NULL *is* abstain.** Defaulting to 0.0 destroys the entire abstain model. A test exists to keep them nullable — do not relax it |
-| `PARTIAL` / `FAILED` never appear in `scoring_runs` | dead enum members, delete them | nothing sets them yet |
-| `jobs_remote` and `jobs_hybrid` both 0 | counter is broken | `work_mode` is NULL on 94 of 99 jobs |
-| company matching is exact, not substring | the `\|\|` multi-company field is being missed | deliberate — see Day 8 record §3.2 |
-| `list_needing_enrichment()` does not filter `is_excluded` | wasted API quota on job 2 | deliberate — having skills and being scorable are different questions (§8.4) |
-| dry-run prints `missing skills 91` and `would enrich 97` | the numbers should agree | they count different things; both correct (§8.5) |
-| both notification branches point at `finalise` | a stub | deliberate — the routing rule is real and tested in both directions; Day 11 changes one entry of `NOTIFICATION_PATH_MAP` |
-| `stages_persisted` is `(none)` on a dry run | persistence is broken | dry-run scoring and dry-run enrichment write nothing by design; `computation_performed` is the field that says work happened |
-| `jobs_enriched` prints `None` after a dry run | should be `0` | the dry-run path returns before computing it — **absent, not zero**, same distinction as the NULL signal columns |
-| coverage floors 0.45 and 0.40 give the same result as 0.50 | the grid is broken | `weight_covered` has three observed values, so the floor is a step function, not a dial (Day 9 note §9.2) |
-| `app/workflows/` imports no repository | inconsistent with services | deliberate — `resolve_targets` calls a service so the rule needs no exception, and an exception is a hole to grow into |
-| `users_skipped_no_cv` counts three different things | the name is wrong, rename it | deliberate — renaming breaks comparison against every `scoring_runs` row written before the breakdown existed. `users_skipped_no_profile` / `_no_active_cv` / `_cv_not_embedded` say which cause applied; only the third is fixable by running the embedding pass |
-| an `agent_runs` row with `finished_at` NULL and every counter NULL | persistence is broken | deliberate — the row is opened BEFORE the graph runs and completed after, so a run killed mid-flight leaves evidence rather than nothing. `ix_agent_runs_unfinished` indexes exactly that predicate. `scoring_runs` uses the same shape (`status='running'`) |
+| Observation                                                         | Looks like                                     | Actually                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `abstain_experience = 98 / 98`                                      | extraction is broken                           | source data ceiling — descriptions truncated at Adzuna's 500-char cap; only 37 of 99 mention years at all                                                                                                                                                                                                                                                                                                      |
+| `notify_eligible = 0`                                               | the gate is broken                             | the gate is working: `weight_covered` 0.50 < `min_weight_covered_to_notify` 0.55                                                                                                                                                                                                                                                                                                                               |
+| signal columns on `recommendations` are NULL                        | missing data, default them to `0.0`            | **NULL _is_ abstain.** Defaulting to 0.0 destroys the entire abstain model. A test exists to keep them nullable — do not relax it                                                                                                                                                                                                                                                                              |
+| `PARTIAL` / `FAILED` never appear in `scoring_runs`                 | dead enum members, delete them                 | nothing sets them yet                                                                                                                                                                                                                                                                                                                                                                                          |
+| `jobs_remote` and `jobs_hybrid` both 0                              | counter is broken                              | `work_mode` is NULL on 94 of 99 jobs                                                                                                                                                                                                                                                                                                                                                                           |
+| company matching is exact, not substring                            | the `\|\|` multi-company field is being missed | deliberate — see Day 8 record §3.2                                                                                                                                                                                                                                                                                                                                                                             |
+| `list_needing_enrichment()` does not filter `is_excluded`           | wasted API quota on job 2                      | deliberate — having skills and being scorable are different questions (§8.4)                                                                                                                                                                                                                                                                                                                                   |
+| dry-run prints `missing skills 91` and `would enrich 97`            | the numbers should agree                       | they count different things; both correct (§8.5)                                                                                                                                                                                                                                                                                                                                                               |
+| both notification branches point at `finalise`                      | a stub                                         | deliberate — the routing rule is real and tested in both directions; Day 11 changes one entry of `NOTIFICATION_PATH_MAP`                                                                                                                                                                                                                                                                                       |
+| `stages_persisted` is `(none)` on a dry run                         | persistence is broken                          | dry-run scoring and dry-run enrichment write nothing by design; `computation_performed` is the field that says work happened                                                                                                                                                                                                                                                                                   |
+| `jobs_enriched` prints `None` after a dry run                       | should be `0`                                  | the dry-run path returns before computing it — **absent, not zero**, same distinction as the NULL signal columns                                                                                                                                                                                                                                                                                               |
+| coverage floors 0.45 and 0.40 give the same result as 0.50          | the grid is broken                             | `weight_covered` has three observed values, so the floor is a step function, not a dial (Day 9 note §9.2)                                                                                                                                                                                                                                                                                                      |
+| `app/workflows/` imports no repository                              | inconsistent with services                     | deliberate — `resolve_targets` calls a service so the rule needs no exception, and an exception is a hole to grow into                                                                                                                                                                                                                                                                                         |
+| `users_skipped_no_cv` counts three different things                 | the name is wrong, rename it                   | deliberate — renaming breaks comparison against every `scoring_runs` row written before the breakdown existed. `users_skipped_no_profile` / `_no_active_cv` / `_cv_not_embedded` say which cause applied; only the third is fixable by running the embedding pass                                                                                                                                              |
+| an `agent_runs` row with `finished_at` NULL and every counter NULL  | persistence is broken                          | deliberate — the row is opened BEFORE the graph runs and completed after, so a run killed mid-flight leaves evidence rather than nothing. `ix_agent_runs_unfinished` indexes exactly that predicate. `scoring_runs` uses the same shape (`status='running'`)                                                                                                                                                   |
+| every `notifications_*` column NULL on an `agent_runs` row          | delivery persistence is broken                 | the notify branch never executed. `notify_eligible` 0 routes to `no_qualifying`, which goes straight to `finalise`. **Absent, not zero** — a run that never delivered has no opinion about how many messages it sent. A delivery that ran and found nothing reports `notification_status = complete_no_qualifying` with `notifications_eligible_selected = 0`; those two states are distinguishable on purpose |
+| the partial index predicate says `WHERE status = 'SENT'`, uppercase | a typo — the enum value is `"sent"`            | SQLAlchemy persists an enum by its **NAME**, so the PostgreSQL labels are `PENDING`/`SENT`/`FAILED`. Verified against `pg_enum`. Lowercase with a `::text` cast would be created successfully and match **nothing, forever** — duplicate prevention absent while the migration reports success. `scripts/notification_constraints_check.py` proves the index FIRES rather than that it exists                  |
+| `notifications` holds several rows for one `(user_id, job_id)`      | the unique constraint was lost                 | deliberate — Day 11 made it an ATTEMPT table. The old `uq_notification_user_job` made a _failure_ permanent, locking a user out of a job after one outage. At most one `SENT` row per pair; any number of `pending`/`failed`. No attempt ceiling, also deliberate                                                                                                                                              |
+| a notification message omits Company, Location or Experience        | the formatter is dropping fields               | the column is NULL and a missing line is the correct rendering. `jobs_with_experience_bounds` is 0 and `work_mode` is NULL on 94 of 99                                                                                                                                                                                                                                                                         |
 
 **This list is a reconstruction and is known to be incomplete.** The
 original list lived in `prompts/day8_open_issues.md`, which was absent
@@ -164,16 +168,18 @@ the end, and returns a dict of counters. `run_ingestion`,
 
 ## 6. Where things stand
 
-| | |
-|---|---|
-| Alembic head | `b3f7c21d9e40` — 9 migrations |
-| Tests | 556 passing (552 before Day 10 Part 4) |
-| Workflow | `app/workflows/` — 7 nodes, 3 conditional edges; runs persisted to `agent_runs` |
-| Jobs | 99, all embedded, 1 excluded (job 2) |
-| CV versions | 3 active, all embedded |
-| Enriched jobs | 5, of which 2 produced skills |
-| Jobs with experience bounds | 0 |
-| Active scoring signals | **3 of 5** |
+|                             |                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| Alembic head                | `c8e2a15f4b93` — 10 migrations                                                  |
+| Tests                       | 664 passing (556 before Day 11)                                                 |
+| Workflow                    | `app/workflows/` — 8 nodes, 3 conditional edges; runs persisted to `agent_runs` |
+| Jobs                        | 99, all embedded, 1 excluded (job 2)                                            |
+| CV versions                 | 3 active, all embedded                                                          |
+| Enriched jobs               | 5, of which 2 produced skills                                                   |
+| Jobs with experience bounds | 0                                                                               |
+| Active scoring signals      | **3 of 5**                                                                      |
+| Notifications sent          | 1, all `trigger_source = manual_test`; **0 from the gate**                      |
+| Feedback rows               | 0                                                                               |
 
 Weights (`Suggested Weight` column of the plan spreadsheet's
 "Matching & Scoring" tab, and matching the code exactly): skill 30%,
@@ -205,7 +211,7 @@ to 1.0. Changing any weight requires bumping `weights_version`.
   inventing values that were not in the description text.
 - **Abstention is mildly rewarded rather than neutral.** A signal that
   abstains leaves the denominator; a signal scoring 0.0 stays in it. So
-  a job with *missing* data can outrank a job with *bad* data. Observed
+  a job with _missing_ data can outrank a job with _bad_ data. Observed
   on real data and verified by hand. This is abstention applied
   consistently — but nobody has decided it. **It needs a decision, not
   a patch.**
@@ -286,7 +292,7 @@ decisions, because each has a live alternative somebody will propose:
 - **`httpcore2`, `httpx2` and `truststore` are transitive, not loose
   pins**, and are not removable while `langgraph` is a dependency:
   `langgraph -> langchain-core -> langsmith -> httpx2 -> httpcore2 /
-  truststore`. Verified with `pip show`; the chain is recorded above the
+truststore`. Verified with `pip show`; the chain is recorded above the
   pin in `requirements.txt`. `httpx2` is present BECAUSE the telemetry
   client is, so this was one issue with the item below, not two.
 - **Tracing fails closed.** `assert_tracing_disabled()` is the first
@@ -348,7 +354,7 @@ decisions, because each has a live alternative somebody will propose:
 - **The `.env` leak is still not remediated.** Human task, still has a
   clock on it.
 - **The workflow skip breakdown cannot be forced live.** `--user-id
-  9999` exercises it through `scripts/score_jobs.py`, but not through
+9999` exercises it through `scripts/score_jobs.py`, but not through
   `scripts/run_agent.py`: `resolve_targets` reports
   `users_with_embedded_cv 0` and routing stops the run at `finalise`
   before scoring executes. That is the graph working as designed. It
@@ -396,7 +402,7 @@ decisions, because each has a live alternative somebody will propose:
   the three counters to the dict `run_scoring` persists, and
   `ScoringRunRepository.finish()` compiles that dict straight into
   `values(**counters)`, so the first non-dry run raised `CompileError:
-  Unconsumed column names`. It survived two parts and a commit because
+Unconsumed column names`. It survived two parts and a commit because
   the suite has no database and every live check had been `--dry-run`.
   Fixed by removing the three keys from the persisted dict; they are
   persisted in `agent_runs` instead. **Adding the columns to
@@ -479,13 +485,13 @@ decisions, because each has a live alternative somebody will propose:
   wrong, and so was its attribution: CV 19 has not been written since
   2026-08-30 and the script never touched it. Proposed instead, not
   built: a read-only check printing every `extracting` row with its claim
-  age, so a claim *younger* than the window whose process died becomes
+  age, so a claim _younger_ than the window whose process died becomes
   visible — that case is currently invisible.
 - **`docs/Day_6_JobIngestion.md:786` says "about ten" Adzuna calls on
   ingestion runs; the table says 7** and the table is right.
   `run_ingestion` opens its row before any network call, so no run that
   spent a call is missing. Correct the prose in Day 11. Probe calls
-  remain recorded nowhere, and a *failed* call is spent without
+  remain recorded nowhere, and a _failed_ call is spent without
   incrementing `pages_fetched` — the ingestion-run spend is exact, the
   total is not.
 - **Adzuna credential rotation now blocks knowing the quota, not just
@@ -495,7 +501,7 @@ decisions, because each has a live alternative somebody will propose:
   on purpose.** They reached the repository after the work, not before.
   `day10_part3.md` §2.2 says Windows Task Scheduler; the amendment's §C
   replaces it and says argue the choice. Amendment §A asked for the fold
-  to happen *before* any code — that precondition is gone, and folding
+  to happen _before_ any code — that precondition is gone, and folding
   now would overwrite the instruction the delivered code was written
   against. **Whether to fold them is a human decision, not an agent
   tidy-up.**

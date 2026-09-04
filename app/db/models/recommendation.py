@@ -11,10 +11,12 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -26,11 +28,41 @@ if TYPE_CHECKING:
 
 
 class NotificationStatus(str, enum.Enum):
-    """Delivery state of a Telegram notification."""
+    """Delivery state of a Telegram notification.
+
+    READ THIS BEFORE WRITING SQL AGAINST notifications.status.
+
+    SQLAlchemy's Enum() persists a Python enum by its NAME, not its
+    value, so the labels in PostgreSQL are 'PENDING', 'SENT' and
+    'FAILED' -- uppercase -- while `NotificationStatus.SENT.value` is
+    the lowercase "sent". Confirmed against pg_enum, not remembered.
+
+    The partial unique index in c8e2a15f4b93 therefore says
+    `WHERE status = 'SENT'`. Written lowercase with a ::text cast it
+    would be created successfully and match nothing forever, which is
+    duplicate prevention that reports success while enforcing nothing.
+    """
 
     PENDING = "pending"
     SENT = "sent"
     FAILED = "failed"
+
+
+# How a notification came to be sent. A plain string, not a fourth
+# PostgreSQL enum type: Day 2c showed those survive downgrade() as
+# orphaned types needing a hand-written drop, which is why
+# users.onboarding_state is a VARCHAR too.
+#
+# The distinction is not cosmetic. It is what lets a human ask "did the
+# production gate ever actually fire?" of a table that also holds rows
+# put there by a person testing delivery by hand. Without it the first
+# manual test would make the answer unknowable forever.
+TRIGGER_SOURCE_SCHEDULED = "scheduled"
+TRIGGER_SOURCE_MANUAL_TEST = "manual_test"
+
+NOTIFICATION_TRIGGER_SOURCES = frozenset(
+    {TRIGGER_SOURCE_SCHEDULED, TRIGGER_SOURCE_MANUAL_TEST}
+)
 
 
 class FeedbackAction(str, enum.Enum):
@@ -194,14 +226,61 @@ class Recommendation(Base, TimestampMixin):
 
 
 class Notification(Base, TimestampMixin):
-    """Record of a recommendation delivered to Telegram.
+    """One ATTEMPT to deliver a recommendation to Telegram.
 
-    Prevents sending the same job to the same user twice.
+    An attempt, not a delivery. That is the Day 11 change and it is the
+    whole point of the table's new shape.
+
+    Until Day 11 this carried `UniqueConstraint(user_id, job_id)`, one
+    row per pair forever. Read as "prevents sending the same job to the
+    same user twice" that looks exactly right, and it does prevent
+    that. What it also did was make a FAILURE permanent: a Telegram
+    outage during the only attempt wrote a `failed` row that occupied
+    the pair's single slot, and the user was locked out of that job for
+    good with no way back. The rule that was actually wanted was never
+    "one row" -- it was "at most one SUCCESS".
+
+    So the constraint is now partial: at most one row per (user_id,
+    job_id) WHERE status = 'SENT'. Any number of `pending` and `failed`
+    rows may sit alongside it, and the sequence
+
+        failed -> failed -> sent
+
+    is a legal, fully recorded history rather than a lost user.
+
+    ENFORCED BY THE DATABASE, NOT BY A CHECK IN THE SERVICE
+
+    The service does check before sending, because a query is cheaper
+    than a message and a friendlier error. But two processes can
+    interleave two such checks and both conclude "not sent yet", and no
+    amount of application care fixes that from inside one of them. The
+    index is what makes a second success impossible rather than
+    unlikely, and the service treats its IntegrityError as the
+    duplicate signal rather than as a crash.
+
+    NO ATTEMPT CEILING. Deliberately no `max_attempts` column and no
+    counter to compare one against. A ceiling would let a transient
+    outage cost a user a job permanently -- the exact failure the old
+    unique constraint produced, reintroduced with a number attached.
+    Failures stay visible as rows; a human reads the count.
     """
 
     __tablename__ = "notifications"
     __table_args__ = (
-        UniqueConstraint("user_id", "job_id", name="uq_notification_user_job"),
+        # Declared on the model as well as in the migration so that
+        # `alembic revision --autogenerate` cannot later propose
+        # dropping an index it cannot see in Base.metadata -- which is
+        # what it did twice to the two HNSW indexes (see Day 4).
+        #
+        # 'SENT' is uppercase because that is the enum LABEL in
+        # PostgreSQL. See NotificationStatus.
+        Index(
+            "uq_notification_sent_user_job",
+            "user_id",
+            "job_id",
+            unique=True,
+            postgresql_where=text("status = 'SENT'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -229,7 +308,42 @@ class Notification(Base, TimestampMixin):
 
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    error_message: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        doc=(
+            "Why this attempt failed, in words safe to read back.\n\n"
+            "NEVER str(exc) on a Telegram exception. The Bot API "
+            "carries the bot token in the URL PATH -- every call is "
+            "https://api.telegram.org/bot<TOKEN>/sendMessage -- so a "
+            "network error whose httpx cause is formatted into this "
+            "column writes a live credential into the database "
+            "permanently, to be read back weeks later by a human with "
+            "no idea what they are looking at. That is the Adzuna "
+            "app_key incident with the credential moved one URL "
+            "component over.\n\n"
+            "Everything written here comes from "
+            "describe_telegram_error(), which reports an exception's "
+            "class and the API's own description field and nothing "
+            "else."
+        ),
+    )
+
+    trigger_source: Mapped[str] = mapped_column(
+        String(32),
+        default=TRIGGER_SOURCE_SCHEDULED,
+        server_default=TRIGGER_SOURCE_SCHEDULED,
+        nullable=False,
+        doc=(
+            "'scheduled' or 'manual_test'. Which path produced this "
+            "attempt.\n\n"
+            "NOT NULL with a server default is safe only because this "
+            "table was empty when the column was added (verified: "
+            "SELECT count(*) returned 0), so no existing row is given "
+            "a provenance it never had. Same argument as "
+            "recommendations.weight_covered, and it is an argument "
+            "about a count on a particular day, not a general licence."
+        ),
+    )
 
     user: Mapped[User] = relationship(back_populates="notifications")
 
@@ -238,9 +352,44 @@ class UserFeedback(Base, TimestampMixin):
     """A user's reaction to a recommended job.
 
     Collected now, used later to personalise ranking weights.
+
+    THE CONSTRAINT IS THREE COLUMNS, AND THE THIRD ONE IS THE POINT
+
+    UNIQUE(user_id, job_id, action), not UNIQUE(user_id, job_id). The
+    difference is whether a person is allowed to change their mind.
+
+        Interested, Interested   -> one row.  A double tap is not two
+                                   opinions, and the timestamp keeps
+                                   meaning when the opinion was FIRST
+                                   held.
+        Interested, Saved        -> two rows. Different questions.
+        Interested, Not Relevant -> two rows. A contradiction, kept on
+                                   purpose: what someone thought before
+                                   they read the description is signal,
+                                   and the pair of rows is a stronger
+                                   signal than either alone.
+
+    A two-column constraint would collapse all three cases to one row
+    and silently drop the second, DIFFERENT action -- while the handler
+    still acknowledged it, so the user would be told their Not Relevant
+    was recorded when nothing had been written. Feedback that reports
+    success without persisting is worse than feedback that errors.
+
+    Inserts go through ON CONFLICT DO NOTHING rather than an upsert, so
+    a repeat never overwrites the original row's created_at. DO UPDATE
+    would quietly move the timestamp forward on every stray tap and
+    make "when did they first say this" unanswerable.
     """
 
     __tablename__ = "user_feedback"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "job_id",
+            "action",
+            name="uq_user_feedback_user_job_action",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 

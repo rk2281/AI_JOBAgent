@@ -190,10 +190,23 @@ def test_every_path_map_target_is_a_real_node() -> None:
             assert target in NODE_NAMES
 
 
-def test_both_notification_branches_are_wired_today() -> None:
-    """Day 11 changes exactly one value here. Recorded so that change
-    is a one-line diff rather than a new branch nobody has run."""
-    assert NOTIFICATION_PATH_MAP == {"notify": "finalise", "no_qualifying": "finalise"}
+def test_the_notification_path_map_is_pinned() -> None:
+    """Day 11 changed exactly one value here, and this is the record of it.
+
+    Before Day 11 this asserted {"notify": "finalise"} -- both branches
+    at finalise -- so that hanging delivery off the notify edge would be
+    a one-line diff against a proven path rather than a new branch
+    nobody had run. That worked: the change was one word, and this test
+    is what made it deliberate.
+
+    It keeps doing the same job in the other direction now. "notify"
+    must reach the delivery node, and "no_qualifying" must NOT: routing
+    the quiet branch through delivery so it could report a row of zeroes
+    would run the node on every run that had nothing to do, and collapse
+    "the gate passed nothing" into the same path as "the gate passed
+    something we failed to send".
+    """
+    assert NOTIFICATION_PATH_MAP == {"notify": "notify", "no_qualifying": "finalise"}
 
 
 # --- the branch Day 11 depends on ----------------------------------------
@@ -222,11 +235,29 @@ def _stub_everything(monkeypatch, *, notify_eligible: int) -> None:
     async def fake_enrichment(*, limit=None, dry_run=False):
         return {"status": "complete", "attempted": 0, "candidates_considered": 97}
 
+    async def fake_delivery(*, user_id=None, dry_run=False):
+        return {
+            "status": "skipped_dry_run" if dry_run else "complete",
+            "trigger_source": "scheduled",
+            "eligible_selected": notify_eligible,
+            "attempted": 0 if dry_run else notify_eligible,
+            "sent": 0 if dry_run else notify_eligible,
+            "failed": 0,
+            "skipped_duplicate": 0,
+            "users_deactivated": 0,
+        }
+
     monkeypatch.setattr(nodes, "resolve_scoring_targets", fake_targets)
     monkeypatch.setattr(nodes, "run_scoring", fake_scoring)
     # Enrichment is the one stage a dry run still CALLS, so it has to be
     # stubbed too or these tests reach for a database.
     monkeypatch.setattr(nodes, "run_enrichment", fake_enrichment)
+    # Day 11: so must delivery, and for a stronger reason. Before Day 11
+    # the notify branch pointed at finalise and executed nothing, so an
+    # unstubbed delivery was not merely a database call -- it did not
+    # exist. Now the branch runs, and a graph test that reached a real
+    # session here would be a graph test that sends Telegram messages.
+    monkeypatch.setattr(nodes, "run_notification_delivery", fake_delivery)
 
 
 def test_the_notify_branch_is_reachable(monkeypatch) -> None:

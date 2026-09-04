@@ -67,6 +67,30 @@ async def dispose_engine() -> None:
         logger.info("Database engine disposed.")
 
 
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    """The session factory itself, for a caller that must own its commits.
+
+    Almost nothing should use this. `session_scope()` commits on exit,
+    which is what every service wants and is why the factory is private
+    to this module.
+
+    The exception is a caller that needs a transaction it will
+    deliberately ROLL BACK -- scripts/notification_constraints_check.py
+    asks PostgreSQL whether it enforces the Day 11 unique rules by
+    attempting the violating inserts, and must leave nothing behind. It
+    cannot use session_scope(), because that would commit its test rows
+    on the way out.
+
+    Raises rather than returning None if the engine is not configured,
+    so a caller cannot silently proceed with nothing.
+    """
+    if _session_factory is None:
+        raise RuntimeError(
+            "Database is not configured. Set DATABASE_URL in your .env file."
+        )
+    return _session_factory
+
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields a database session per request."""
     if _session_factory is None:

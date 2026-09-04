@@ -1,4 +1,4 @@
-"""The graph itself: seven nodes, three conditional edges, nothing else.
+"""The graph itself: eight nodes, three conditional edges, nothing else.
 
 This is the only module in the project that imports langgraph. It sits
 in app/workflows/ rather than app/integrations/ because the layering
@@ -22,6 +22,10 @@ category as sqlalchemy in repositories and pydantic in schemas.
   decide_notification                                |
       |                                              |
    "notify" / "no_qualifying"                        |
+      |            |                                 |
+    notify         |    (sends, records every attempt)|
+      |            |                                 |
+      +------------+                                 |
       |                                              |
    finalise <----------------------------------------+
       |
@@ -31,11 +35,17 @@ Only three edges are conditional. The skip decisions are inside the
 nodes, so a skipped stage still has somebody to record WHY it was
 skipped -- an edge that routes around a node leaves nobody to do that.
 
-The two notification branches both point at finalise today. That is not
-a stub: the routing rule is real and tested in both directions, and Day
-11 changes one entry of NOTIFICATION_PATH_MAP to point "notify" at a
-delivery node. Wiring it now is what makes the branch provably reachable
-before the first message is ever sent to a person.
+Day 11 changed one entry of NOTIFICATION_PATH_MAP, exactly as Day 9
+said it would: "notify" points at a delivery node instead of at
+finalise. That the edge had already been wired and tested in both
+directions is what made the first real message a one-word change to a
+proven path rather than a branch running for the first time with
+somebody's phone on the other end.
+
+"no_qualifying" still goes straight to finalise. It is the branch that
+runs today on real data -- weight_covered is 0.50 against a floor of
+0.55 -- and that is the gate working, not a stub. See CLAUDE.md
+section 1.
 """
 
 from __future__ import annotations
@@ -49,6 +59,7 @@ from app.workflows.nodes import (
     embed_jobs,
     enrich_jobs,
     finalise,
+    notify,
     resolve_targets,
     score_and_rank,
 )
@@ -72,6 +83,7 @@ NODE_NAMES = frozenset(
         "enrich_jobs",
         "score_and_rank",
         "decide_notification",
+        "notify",
         "finalise",
     }
 )
@@ -83,8 +95,19 @@ NODE_NAMES = frozenset(
 TARGETS_PATH_MAP = {"discover_jobs": "discover_jobs", "finalise": "finalise"}
 SCORING_PATH_MAP = {"decide_notification": "decide_notification", "finalise": "finalise"}
 
-# Day 11 changes exactly one value here.
-NOTIFICATION_PATH_MAP = {"notify": "finalise", "no_qualifying": "finalise"}
+# Day 11 changed exactly one value here: "notify" now points at the
+# delivery node instead of at finalise. Day 9 wired both branches to
+# finalise and tested the routing in both directions specifically so
+# that this line would be a one-word edit against a proven edge, rather
+# than a branch executing for the first time while sending a message to
+# a real person.
+#
+# "no_qualifying" still goes straight to finalise, and must. There is
+# nothing to deliver, and routing it through the delivery node so that
+# it could report a row of zeroes would mean the node ran on every run
+# that had nothing to do -- turning "the gate passed nothing" and "the
+# gate passed something we failed to send" into the same code path.
+NOTIFICATION_PATH_MAP = {"notify": "notify", "no_qualifying": "finalise"}
 
 
 def build_graph():
@@ -113,6 +136,7 @@ def build_graph():
     graph.add_node("enrich_jobs", enrich_jobs)
     graph.add_node("score_and_rank", score_and_rank)
     graph.add_node("decide_notification", decide_notification)
+    graph.add_node("notify", notify)
     graph.add_node("finalise", finalise)
 
     graph.add_edge(START, "resolve_targets")
@@ -132,6 +156,11 @@ def build_graph():
     graph.add_conditional_edges(
         "decide_notification", route_notification, NOTIFICATION_PATH_MAP
     )
+
+    # Unconditional. Delivery decides for itself what to do and records
+    # it; there is no outcome of sending messages that should route
+    # somewhere other than the end of the run.
+    graph.add_edge("notify", "finalise")
 
     graph.add_edge("finalise", END)
 

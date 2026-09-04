@@ -21,6 +21,34 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id(self, user_id: int) -> User | None:
+        """Fetch by internal id.
+
+        Notification delivery works from `recommendations.user_id`, an
+        internal id, and needs the telegram_id and is_active flag that
+        live on the user row. Every other caller in the project starts
+        from a Telegram update and so starts from a telegram_id.
+        """
+        return await self._session.get(User, user_id)
+
+    async def deactivate(self, user: User) -> None:
+        """Stop notifying this user.
+
+        Called when Telegram reports the chat is permanently
+        undeliverable -- the bot was blocked, or the account is gone.
+        Reuses the existing `is_active` flag rather than introducing a
+        second notion of user status: two columns that both mean
+        "should we contact them" is two columns that can disagree.
+
+        Note what this does NOT do: it does not stop the user being
+        SCORED. `select_target_user_ids` draws from Profile.user_id and
+        is unchanged, so their recommendations keep being computed and
+        are waiting intact if they unblock the bot. Only delivery
+        consults this flag.
+        """
+        user.is_active = False
+        await self._session.flush()
+
     async def get_or_create(
         self,
         telegram_id: int,

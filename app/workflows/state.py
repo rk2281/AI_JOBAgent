@@ -81,6 +81,13 @@ DEGRADED_SERVICE_STATUSES = frozenset(
         "degenerate",
         "partial",
         "failed",
+        # Day 11. Notification delivery stopped because OUR Telegram
+        # credentials were rejected -- nothing to do with any user, and
+        # nothing a retry fixes. Degraded rather than failed because the
+        # scoring that ran before it is still valid and still persisted;
+        # what was lost is the messages, and `failed` would say the whole
+        # run produced nothing.
+        "configuration_error",
     }
 )
 
@@ -116,6 +123,7 @@ class AgentState(TypedDict, total=False):
     embedding: dict[str, Any] | None
     enrichment: dict[str, Any] | None
     scoring: dict[str, Any] | None
+    notification: dict[str, Any] | None
 
     # --- bookkeeping ---
     stages_attempted: Annotated[list[str], operator.add]
@@ -164,6 +172,7 @@ def initial_state(
         embedding=None,
         enrichment=None,
         scoring=None,
+        notification=None,
         stages_attempted=[],
         stages_skipped=[],
         stages_computed=[],
@@ -271,6 +280,29 @@ def scoring_computed(result: dict[str, Any]) -> bool:
     return int(result.get("pairs_scored") or 0) > 0
 
 
+def notification_computed(result: dict[str, Any]) -> bool:
+    """attempted under a real run, eligible_selected under a dry run.
+
+    The same two-counter shape as enrichment_computed(), and for the
+    same reason: a dry run makes no Telegram call, so `attempted` stays
+    0 while `eligible_selected` records how many rows the gate chose.
+    Both are computation over domain data -- deciding that two of a
+    user's 98 recommendations clear three gates is the work, and the
+    send is just what follows.
+
+    Reading only `attempted` would report "no work" for a rehearsal that
+    evaluated every stored recommendation, which is the did_work boolean
+    mistake this module's docstring is about.
+
+    A run that selected nothing correctly reports False. Nothing was
+    computed over: the gate was applied to rows and passed none, and
+    `notifications_eligible_selected = 0` in the summary is what says so.
+    """
+    attempted = int(result.get("attempted") or 0)
+    selected = int(result.get("eligible_selected") or 0)
+    return max(attempted, selected) > 0
+
+
 def is_degraded_status(status: str | None) -> bool:
     return status in DEGRADED_SERVICE_STATUSES
 
@@ -346,6 +378,7 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
     embedding = state.get("embedding") or {}
     enrichment = state.get("enrichment") or {}
     scoring = state.get("scoring") or {}
+    notification = state.get("notification") or {}
     targets = state.get("targets") or {}
 
     stages_computed = list(state.get("stages_computed") or [])
@@ -353,7 +386,7 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
 
     degraded = any(
         is_degraded_status(result.get("status"))
-        for result in (ingestion, embedding, enrichment, scoring)
+        for result in (ingestion, embedding, enrichment, scoring, notification)
     )
 
     status = select_graph_status(
@@ -415,4 +448,30 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
         "jobs_scored": scoring.get("jobs_scored"),
         "pairs_scored": scoring.get("pairs_scored"),
         "jobs_skipped_no_embedding": scoring.get("jobs_skipped_no_embedding"),
+        # --- delivery (Day 11) -------------------------------------------
+        #
+        # notify_eligible above is what SCORING counted. These are what
+        # DELIVERY did, and they are reported side by side rather than
+        # reconciled here, because the interesting case is when they
+        # disagree: notify_eligible 2 with notifications_eligible_selected
+        # 0 means a job retired or a threshold moved between the two, and
+        # a single merged number would hide exactly that.
+        #
+        # .get() with no default, like every counter around it. A run
+        # whose notify branch never executed has NO opinion about how
+        # many messages were sent, and 0 would state one -- the same
+        # absent-is-not-zero rule as the abstained signal columns.
+        #
+        # feedback_events is deliberately absent. Feedback arrives from
+        # Telegram taps hours after a run has exited, so a per-run
+        # counter for it could only ever report 0 -- a number that looks
+        # like a measurement and is an artefact of when the run happened
+        # to end.
+        "notification_status": notification.get("status"),
+        "notifications_eligible_selected": notification.get("eligible_selected"),
+        "notifications_attempted": notification.get("attempted"),
+        "notifications_sent": notification.get("sent"),
+        "notifications_failed": notification.get("failed"),
+        "notifications_skipped_duplicate": notification.get("skipped_duplicate"),
+        "notifications_users_deactivated": notification.get("users_deactivated"),
     }

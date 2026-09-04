@@ -118,6 +118,27 @@ def _print_summary(summary: dict) -> None:
     print(f"notify_eligible           {summary['notify_eligible']}")
     print(f"terminal_reason           {summary['terminal_reason']}")
 
+    # notify_eligible above is what SCORING counted;
+    # notifications_eligible_selected is what DELIVERY found. Printed
+    # next to each other rather than merged, because the two disagreeing
+    # is the most interesting thing this stage can report and a single
+    # number would hide it.
+    #
+    # None here means the notify branch never executed -- absent, not
+    # zero. Printed as None on purpose, exactly like jobs_enriched after
+    # a dry run.
+    print("--- delivery")
+    for key in (
+        "notification_status",
+        "notifications_eligible_selected",
+        "notifications_attempted",
+        "notifications_sent",
+        "notifications_failed",
+        "notifications_skipped_duplicate",
+        "notifications_users_deactivated",
+    ):
+        print(f"{key:31} {summary[key]}")
+
 
 async def run(args: argparse.Namespace) -> int:
     state = initial_state(

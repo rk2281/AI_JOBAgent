@@ -171,5 +171,40 @@ class AgentRun(Base):
     pairs_scored: Mapped[int | None] = mapped_column(Integer)
     jobs_skipped_no_embedding: Mapped[int | None] = mapped_column(Integer)
 
+    # --- notification delivery (Day 11) ------------------------------------
+    #
+    # notify_eligible above is what SCORING counted with is_notify_eligible();
+    # notifications_eligible_selected is what DELIVERY found when it applied
+    # the same function to the stored rows moments later. Two columns rather
+    # than one on purpose: they can legitimately differ -- a job retired
+    # between the two, a user changed their threshold, a pair was already
+    # sent -- and a single reconciled number would make that invisible.
+    # A disagreement is the most interesting thing this stage can report.
+    #
+    # Every one nullable. A run that took the `no_qualifying` branch never
+    # entered delivery and has NO opinion about how many messages were
+    # sent; 0 would state one. Absent is not zero -- the same rule as the
+    # abstained signal columns, which CLAUDE.md section 1 forbids
+    # defaulting to 0.0.
+    #
+    # There is no feedback counter here, and that is a decision rather
+    # than an omission. Feedback arrives when a person taps a button,
+    # which is hours after the run that sent the message has exited, so a
+    # per-run feedback count could only ever be 0 -- a number that reads
+    # as a measurement and is an artefact of when the run ended.
+    notification_status: Mapped[str | None] = mapped_column(String(32))
+    notifications_eligible_selected: Mapped[int | None] = mapped_column(Integer)
+    notifications_attempted: Mapped[int | None] = mapped_column(Integer)
+    notifications_sent: Mapped[int | None] = mapped_column(Integer)
+    notifications_failed: Mapped[int | None] = mapped_column(Integer)
+    notifications_skipped_duplicate: Mapped[int | None] = mapped_column(Integer)
+
+    # Users switched to is_active = False because Telegram reported their
+    # chat permanently undeliverable. Counted because it is otherwise the
+    # most invisible thing this stage does: a deactivated user simply
+    # stops appearing in future delivery, with nothing anywhere saying
+    # when or why. Invisible is worse than wrong.
+    notifications_users_deactivated: Mapped[int | None] = mapped_column(Integer)
+
     __table_args__ = ({"comment": "One row per workflow graph run. See app/db/models/agent.py."},)
 

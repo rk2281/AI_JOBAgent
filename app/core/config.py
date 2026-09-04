@@ -293,6 +293,27 @@ class Settings(BaseSettings):
     # Compared with >=. Coverage of exactly 0.55 qualifies.
     min_weight_covered_to_notify: float = 0.55
 
+    # --- notification delivery (Day 11) ------------------------------------
+    #
+    # How many messages ONE user may receive from ONE run.
+    #
+    # A delivery policy, not a fourth gate, and the distinction is worth
+    # keeping straight. The three gates above answer "is this job worth
+    # telling this person about" and each one is about the job. This
+    # answers "how many notifications in a burst stop being useful", and
+    # it is about the person: twelve messages at 3am is not a
+    # notification, it is a reason to block the bot -- and a blocked bot
+    # costs every future notification, not just the eleven surplus ones.
+    #
+    # Applied AFTER the gate, never instead of it. A run that gates four
+    # jobs in sends three and leaves the fourth unsent and unrecorded, so
+    # the next run picks it up: `sent_job_ids()` suppresses only what
+    # actually went out.
+    #
+    # Not a retry limit. Nothing here caps how many times a FAILED
+    # delivery may be attempted -- see notification_delivery.py.
+    max_notifications_per_user: int = 3
+
     # Experience taper. A job wanting [lo, hi] years scores a
     # candidate holding x years as:
     #
