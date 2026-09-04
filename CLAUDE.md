@@ -48,6 +48,7 @@ do in this repository, because none of these produce a failure when
 | coverage floors 0.45 and 0.40 give the same result as 0.50 | the grid is broken | `weight_covered` has three observed values, so the floor is a step function, not a dial (Day 9 note §9.2) |
 | `app/workflows/` imports no repository | inconsistent with services | deliberate — `resolve_targets` calls a service so the rule needs no exception, and an exception is a hole to grow into |
 | `users_skipped_no_cv` counts three different things | the name is wrong, rename it | deliberate — renaming breaks comparison against every `scoring_runs` row written before the breakdown existed. `users_skipped_no_profile` / `_no_active_cv` / `_cv_not_embedded` say which cause applied; only the third is fixable by running the embedding pass |
+| an `agent_runs` row with `finished_at` NULL and every counter NULL | persistence is broken | deliberate — the row is opened BEFORE the graph runs and completed after, so a run killed mid-flight leaves evidence rather than nothing. `ix_agent_runs_unfinished` indexes exactly that predicate. `scoring_runs` uses the same shape (`status='running'`) |
 
 **This list is a reconstruction and is known to be incomplete.** The
 original list lived in `prompts/day8_open_issues.md`, which was absent
@@ -165,9 +166,9 @@ the end, and returns a dict of counters. `run_ingestion`,
 
 | | |
 |---|---|
-| Alembic head | `9a4e7c1d5b82` — 8 migrations |
-| Tests | 541 passing (515 before Day 10 Part 2) |
-| Workflow | `app/workflows/` — 7 nodes, 3 conditional edges, no `agent_runs` table |
+| Alembic head | `b3f7c21d9e40` — 9 migrations |
+| Tests | 552 passing (541 before Day 10 Part 3) |
+| Workflow | `app/workflows/` — 7 nodes, 3 conditional edges; runs persisted to `agent_runs` |
 | Jobs | 99, all embedded, 1 excluded (job 2) |
 | CV versions | 3 active, all embedded |
 | Enriched jobs | 5, of which 2 produced skills |
@@ -354,6 +355,88 @@ decisions, because each has a live alternative somebody will propose:
   means the breakdown's end-to-end path is covered by a stubbed test
   only, and will stay that way until a real user is unscorable while
   another is not.
+
+### Closed by Day 10 Part 3
+
+- **`agent_runs` exists.** 38 columns derived from `build_run_summary()`
+  plus `id`; the Day 9 claim that the summary would still be the schema
+  on Day 10 held exactly. `test_every_summary_key_has_a_column` fails if
+  a summary key has nowhere to land — Day 11 adds fields, and a field
+  with no column is silently dropped on write while every test stays
+  green.
+- **Two writes, not one.** The row is opened before the graph runs and
+  completed after, so an interrupted run leaves `finished_at IS NULL`
+  rather than no row. Not a status enum — that is Day 11. This is now a
+  §1 row, because it will look like broken persistence.
+- **Persistence lives in `scripts/run_agent.py`, never in a node.**
+  Forced by the §1 row that `app/workflows/` imports no repository. The
+  driver owns the database; the graph owns the decisions.
+- **The nightly task is registered by `scripts/schedule_agent.ps1`**
+  (`-SelfTest` arms nothing; it passed). Absolute venv interpreter,
+  explicit working directory, exit code written as the last line of a
+  gitignored log. No `--dry-run`, ever.
+
+### Open after Day 10 Part 3
+
+- **CREDENTIAL ROTATION IS STILL NOT DONE, and this is now incident
+  eleven.** A shared archive not built with `pack.ps1` contained `.env`,
+  the whole of `storage/cvs/` — real candidate CV PDFs for users 2, 3
+  and 10 — and a stray `files (1).zip`. Three of the five
+  `$ForbiddenPatterns`, in one archive. The four credentials have now
+  left the machine **twice** and have never been rotated.
+  `storage/` is a category no previous incident involved: a key can be
+  replaced, a leaked CV cannot be recalled. `pack.ps1` needs no change;
+  `-SelfTest` passes, 145 files. **It was bypassed, not broken.**
+- **Nothing writes `state["errors"]`, so the graph's `failed` status is
+  unreachable.** `run_agent.py` exits non-zero on `failed` or
+  `degraded`; only `degraded` can actually occur. Same shape as
+  `PARTIAL`/`FAILED` never appearing in `scoring_runs`. Do not invent a
+  writer to make it reachable; do not rely on it either.
+- **`scoring_runs` has no columns for the skip breakdown.** Part 1 added
+  the three counters to the dict `run_scoring` persists, and
+  `ScoringRunRepository.finish()` compiles that dict straight into
+  `values(**counters)`, so the first non-dry run raised `CompileError:
+  Unconsumed column names`. It survived two parts and a commit because
+  the suite has no database and every live check had been `--dry-run`.
+  Fixed by removing the three keys from the persisted dict; they are
+  persisted in `agent_runs` instead. **Adding the columns to
+  `scoring_runs` remains undecided** — it would be a second copy of
+  numbers `agent_runs` already holds, in a table whose funnel assertion
+  does not cover them.
+- **`scripts/concurrent_claim_dryrun.py` is not a dry run.** It fires
+  real Gemini extractions. Running it spent two calls and left **CV 19
+  in `extraction_status = 'extracting'`**, which may cause future
+  extraction claims to skip it. Not repaired — it is a data mutation
+  nobody authorised and it is unclear whether the row was already stuck.
+  In this repository "dryrun" means "no writes" for `scoring_isolate`
+  and `notify_reachability_probe`, and means something else here.
+- **The scheduled task has never been triggered by Windows.** §2.4 was
+  blocked by the rotation above. `-SelfTest` proves the interpreter, the
+  working directory, the log path and the command line; it does not
+  prove Windows starts the task, that its credentials can read the repo,
+  or that a log lands with a real exit code in it.
+- **Named, not built: a pre-share archive verifier.** Both archive
+  incidents were a person reaching for Explorer or `Compress-Archive`
+  instead of the script, and nothing in the repository can intercept a
+  right-click elsewhere. `pack.ps1` guarantees only its own output,
+  which does nothing about an archive it did not produce. The cheapest
+  loud failure is `scripts/verify_archive.ps1 <path>`, applying
+  `$ForbiddenPatterns` to an arbitrary zip before it is shared.
+- **The abstention asymmetry is measured, not decided.**
+  `scripts/asymmetry_isolate.py` (read-only, `combine()` not imported,
+  self-checking against the stored `final_score` to 1.1e-16). The
+  finding that matters: **removing the asymmetry makes notification
+  strictly less reachable.** Candidate B — abstentions kept in the
+  denominator — yields `notify_eligible = 0` at every floor down to
+  0.30, because it halves the score range (max 0.9835 → 0.4917) against
+  an unmoved 0.7 threshold. The asymmetry is currently the only reason
+  any pair is near the gate. Day 11 decides; Day 10 does not.
+- **`users_skipped_no_profile` can never be non-zero through
+  `run_agent.py`.** `select_target_user_ids` draws ids from
+  `Profile.user_id`, so every id in the loop has a profile by
+  construction, and `--user-id X` for an X with no profile terminates at
+  `no_scorable_users` before scoring runs. A zero there is evidence of
+  nothing. Documented where the counter is defined.
 
 ---
 
