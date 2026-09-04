@@ -167,7 +167,7 @@ the end, and returns a dict of counters. `run_ingestion`,
 | | |
 |---|---|
 | Alembic head | `b3f7c21d9e40` — 9 migrations |
-| Tests | 552 passing (541 before Day 10 Part 3) |
+| Tests | 556 passing (552 before Day 10 Part 4) |
 | Workflow | `app/workflows/` — 7 nodes, 3 conditional edges; runs persisted to `agent_runs` |
 | Jobs | 99, all embedded, 1 excluded (job 2) |
 | CV versions | 3 active, all embedded |
@@ -437,6 +437,82 @@ decisions, because each has a live alternative somebody will propose:
   construction, and `--user-id X` for an X with no profile terminates at
   `no_scorable_users` before scoring runs. A zero there is evidence of
   nothing. Documented where the counter is defined.
+
+### Open after Day 10 Part 4
+
+- **Notification is reachable today by one config change, and that is a
+  decision nobody has made.** `min_weight_covered_to_notify` 0.55 → 0.50
+  takes `notify_eligible` from 0 to 2. 242 of 294 pairs sit at
+  `weight_covered` exactly 0.50, five hundredths under the gate. The two
+  §1 rows about this — "the floor is a step function, not a dial" and
+  "`notify_eligible = 0` … the gate is working" — are both **correct**
+  and neither is being challenged. What is wrong is the operational
+  conclusion drawn from them, that coverage is a dead end. **Do not
+  change the floor to make this go away.** See the Day 10 Part 3 record,
+  Task 3, first section.
+- **The two qualifying pairs are both user 2's, and both score high for
+  a structural reason rather than a match reason.** Where skill and
+  experience abstain and location and title are both 1.0, the
+  renormalisation reduces exactly to `final = 0.4 * semantic + 0.6` —
+  verified against stored values at difference 0.000e+00. So
+  `final_score` has a **floor of 0.60** for that shape however poor the
+  semantic match, and clears the 0.7 threshold at `semantic >= 0.25`.
+  This is the abstention asymmetry as a closed form. It means the floor
+  and the threshold cannot be decided separately: lowering the floor
+  admits precisely the population the floor guards against.
+- **`concurrent_claim_dryrun.py` should be renamed to
+  `concurrent_claim_probe.py`.** It fires real Gemini extractions. Not a
+  §1 row — §1 is for things that look like bugs and are decisions, and
+  this is a defect with a victim row; a §1 entry would immunise it
+  against being fixed. The rule the name breaks is worth stating
+  outright: **"dryrun" in a script name is a promise of no writes.**
+- **CV 24 — user 2's active CV — reads `extraction_status = 'failed'`
+  while its extracted version exists and is embedded.** The script
+  re-extracted an already-complete CV on 2026-09-04, the call timed out,
+  and the status was overwritten. No data was lost (`cv_versions` id 10
+  is intact), and nothing downstream noticed because scoring gates on
+  `cv_versions.embedding`. `profile_view.py` is the one consumer that
+  does read it, i.e. what the user sees. Needs a decision, not a repair.
+- **CV 19 is NOT locked out and needs no repair.** Its claim is ~5 days
+  old against a `DEFAULT_STALE_AFTER` of 15 minutes, so
+  `claim_for_extraction()` will take it. The Part 3 record's worry was
+  wrong, and so was its attribution: CV 19 has not been written since
+  2026-08-30 and the script never touched it. Proposed instead, not
+  built: a read-only check printing every `extracting` row with its claim
+  age, so a claim *younger* than the window whose process died becomes
+  visible — that case is currently invisible.
+- **`docs/Day_6_JobIngestion.md:786` says "about ten" Adzuna calls on
+  ingestion runs; the table says 7** and the table is right.
+  `run_ingestion` opens its row before any network call, so no run that
+  spent a call is missing. Correct the prose in Day 11. Probe calls
+  remain recorded nowhere, and a *failed* call is spent without
+  incrementing `pages_fetched` — the ingestion-run spend is exact, the
+  total is not.
+- **Adzuna credential rotation now blocks knowing the quota, not just
+  spending it.** The only authority on what remains is Adzuna's own
+  dashboard, which needs the credentials that have leaked twice.
+- **The Day 10 prompts are now committed, unfolded and self-contradicting
+  on purpose.** They reached the repository after the work, not before.
+  `day10_part3.md` §2.2 says Windows Task Scheduler; the amendment's §C
+  replaces it and says argue the choice. Amendment §A asked for the fold
+  to happen *before* any code — that precondition is gone, and folding
+  now would overwrite the instruction the delivered code was written
+  against. **Whether to fold them is a human decision, not an agent
+  tidy-up.**
+- **Divergence from the plan was pre-authorised; diverging silently was
+  not.** Amendment §B: "Divergence is allowed here. What is not allowed
+  is diverging without saying so." Task Scheduler was a permitted choice.
+  The failure was that the argument was written five days late instead of
+  before the code, which left a defensible decision looking identical to
+  an unexamined one.
+- **Nothing observes whether the nightly run happened.** A skipped night
+  writes no log and leaves no `agent_runs` row, and nothing looks for
+  either absence — §0's shape exactly. Task Scheduler survives reboots
+  and exposes `LastTaskResult`, which is more survivable than APScheduler
+  but is still not observed by anything here. **Named, not built:** a
+  staleness check over `agent_runs.started_at` that complains when the
+  newest row is older than about 26 hours. One query, mechanism-independent,
+  and it observes the work rather than the plan.
 
 ---
 
