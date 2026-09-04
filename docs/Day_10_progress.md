@@ -608,3 +608,244 @@ schema can quietly break:
 row and the work's own row both exist and point at each other. That was
 the design intent: `agent_runs` records what the graph decided, not what
 the work did.
+
+## Part 3, Task 2 — unattended operation
+
+### §2.1 — the four claims, each verified by a stated method
+
+| Claim | How verified | Result |
+|---|---|---|
+| exits non-zero on `failed` or `degraded` | read the line: `return 1 if summary["status"] in ("failed", "degraded") else 0` | holds — **with a caveat below** |
+| quota exhaustion is `degraded`, never quiet success | 5 existing tests in `test_workflow_state.py` | holds |
+| a run that computed nothing reports `complete_no_work` | same tests | holds |
+| `build_graph()` refuses if the tracer would be enabled | live: `LANGSMITH_TRACING=1 python -m scripts.run_agent --dry-run` | exit 1, names the variable |
+
+**The caveat matters.** `failed` is real code guarding a state nothing
+can currently produce, because nothing writes `state["errors"]` (see the
+Task 1 finding). So of the two statuses that exit non-zero, only
+`degraded` can actually fire. The scheduler's ability to distinguish a
+problem from a quiet night is real but narrower than the sentence
+suggests. Not a bug — the same shape as `PARTIAL`/`FAILED` never
+appearing in `scoring_runs` — but not something to lean on.
+
+The tracer check also confirmed the older `LANGSMITH_TRACING` spelling
+works live, not just the one used in Part 2's verification.
+
+### §2.2 — the registration script
+
+`scripts/schedule_agent.ps1`, in the style of `pack.ps1`, with a
+`-SelfTest` that arms nothing. Self-test **PASS**.
+
+The three things it exists to get right, and one of them was proven
+necessary during this very session:
+
+1. **The interpreter.** A scheduled task inherits the SYSTEM PATH, so
+   `python` resolves to whatever is installed machine-wide. Partway
+   through this session that happened for real: `python` became
+   `C:\Python312\python.exe`, and the test suite went from 541 passed to
+   **22 collection errors** — every third-party import gone at once. It
+   looked like a broken repository and was a broken PATH. The task
+   therefore invokes `.venv\Scripts\python.exe` by absolute path, and
+   `-SelfTest` asks that interpreter for its own `sys.executable` and
+   refuses if it is not the expected one.
+2. **The working directory.** Scheduled tasks start in
+   `C:\Windows\System32`. `cv_storage_dir` is `"storage/cvs"` — a
+   RELATIVE path — so a run started there would resolve CV storage to
+   `C:\Windows\System32\storage\cvs`. Hence `-WorkingDirectory`.
+3. **The exit code.** Captured along with stdout and stderr, and written
+   as the **last line** of the log. An unattended run whose exit code is
+   not recorded reports nothing, which is worse than not running,
+   because it looks like it worked.
+
+**No `--dry-run`.** A scheduled dry run is a scheduled no-op that
+reports a healthy status every morning while doing nothing.
+
+A generated `scripts/run_nightly.ps1` holds the actual command rather
+than a long `-Argument` string, because a Scheduled Task argument is
+quoted by the scheduler, re-parsed by PowerShell, and parsed again by
+`python -m`; each layer can lose a quote. It is committed even though it
+is generated, because it is what the machine actually executes and an
+auditor should be able to read it without running a generator. It is
+rewritten on every register, so it cannot drift.
+
+### What the log can contain on a failing run — checked, not assumed
+
+The run invokes `app/integrations/adzuna.py`, and Adzuna's `app_id` and
+`app_key` travel as **query parameters**, so any exception whose text
+contains the request URL contains both credentials. An unattended log is
+exactly the incidental-handling shape that produced nine of the eleven
+incidents.
+
+They do not reach the log, **by construction rather than by luck**:
+`AdzunaClient` passes every provider error through
+`describe_http_error()` and raises `from None` specifically so a chained
+traceback cannot print the original URL, and the ingestion node stores
+that already-redacted string instead of formatting an exception of its
+own. So a failing run's log can contain a redacted provider message, a
+traceback whose frames are this repository's own files, and the summary,
+which prints counters and status strings only.
+
+That is a claim about today's code, not a property of logging. If a
+future change logs a raw exception from `app/integrations/`, this log
+becomes the leak. `logs/` is gitignored for that reason — and repairing
+`.gitignore` was itself a small incident: the file had no trailing
+newline, so appending produced `*.ziplogs/`, silently un-ignoring `*.zip`.
+Caught by checking `git check-ignore` afterwards rather than trusting
+the append.
+
+### Not handled, named rather than quietly omitted
+
+- **Overlapping runs — handled**, via `-MultipleInstances IgnoreNew`.
+  Chosen over `Queue` because two concurrent runs would both score the
+  same rows and the second would spend Adzuna quota re-fetching what the
+  first is inserting. Dropping is the cheaper wrong answer, and
+  `agent_runs` makes the drop visible afterwards: one row where two were
+  expected.
+- **Missed runs — partly.** `-StartWhenAvailable` covers a machine
+  asleep at 03:00. It does not cover a machine off for a week: Windows
+  fires one catch-up run, not seven, and nothing distinguishes "ran
+  once, late" from "ran once, on time" except `agent_runs.started_at`.
+  Doing better needs schedule-vs-actual reconciliation, which belongs
+  with Day 11's status work.
+- **Log growth — not handled.** One ~3 KB file per run, about 1 MB a
+  year. Last on the list rather than solved because a rotation scheme is
+  code that can delete the evidence of the run you most wanted to read,
+  and 1 MB/year does not buy that risk.
+
+### §2.3 — restart and resilience
+
+Both existing scripts were run. Neither needed a code change; both
+needed a fix at the invocation, which is worth recording because the
+next person will hit the same thing:
+
+- `restart_resilience_dryrun` crashed on `UnicodeEncodeError: 'charmap'
+  codec can't encode '\U0001f44b'` — the console is cp1252 and a bot
+  reply contains an emoji. Re-run with `PYTHONIOENCODING=utf-8` it
+  **passes**: after disposing and re-initialising the engine, `/start`
+  resumed at `AWAITING_ROLES` and the stored CV survived.
+- `concurrent_claim_dryrun` requires `--user-id`.
+
+**Neither covers "the process died mid-run" of the workflow.** The first
+covers onboarding state across a process restart; the second covers two
+extractions racing for one CV.
+
+That question was answered empirically instead, by accident, earlier in
+this session: the crashed real run left **`agent_runs` id 1 with
+`finished_at NULL` and every other column NULL**, and `scoring_runs` id
+3 stuck at `status='running'`. Both tables recorded the same incident at
+two layers. That is what an interrupted run leaves under the write point
+chosen in §1.3, demonstrated rather than described.
+
+### A caution: `concurrent_claim_dryrun` is not a dry run
+
+Despite the name it fires **real Gemini extractions**. Running it made
+two live calls, one of which timed out, and it left **CV 19 in
+`extraction_status = 'extracting'`**. `cv_versions` did not grow (9
+before, 9 after), so no data was corrupted, but a CV parked in
+`extracting` may be skipped by future extraction claims.
+
+Not silently repaired: I cannot tell from here whether that row was
+already stuck before, and resetting an extraction status is a data
+mutation nobody authorised. **Flagged for a decision.** The script's
+name is the finding — "dryrun" in this repository means "no writes" for
+`scoring_isolate` and `notify_reachability_probe`, and means something
+else here.
+
+### §2.4 — not run, and why
+
+**Blocked by §0.2 stop condition 6.** Task 0.a confirmed no credential
+has been rotated after incident eleven, so spending the one remaining
+Adzuna run would spend it on a key that is compromised and scheduled for
+replacement — wasting both the run and the rotation.
+
+What that leaves unproven, stated plainly: the scheduled task has never
+been triggered by the Task Scheduler. `-SelfTest` proves the
+interpreter, the working directory, the log directory and the command
+line; it does not prove Windows will start the task at 03:00, that the
+task's credentials can read the repo, or that the log lands with a real
+exit code in it. Everything up to the moment Windows takes over is
+verified; the handover itself is not.
+
+---
+
+## Part 3, Task 3 — the abstention asymmetry, measured
+
+### The headline, first, in its own line
+
+**Removing the asymmetry makes notification strictly LESS reachable, not
+more.** Candidate B — abstaining signals kept in the denominator at 0.0
+— produces `notify_eligible = 0` at **every** coverage floor down to
+0.30, because it halves the score range: candidate A's `final_score`
+tops out at **0.9835**, candidate B's at **0.4917**, against a threshold
+of 0.7 that neither floor nor coverage affects.
+
+So the asymmetry is currently the **only** reason any pair is anywhere
+near the notification threshold. That is the opposite of what "missing
+data can outrank bad data" suggests at first reading, and it is the fact
+Day 11 most needs before it decides anything.
+
+### The script
+
+`scripts/asymmetry_isolate.py`. No writes, no API calls. `combine()` is
+**not imported** — importing it and mutating its behaviour to try each
+candidate would make the script share code with the thing it is
+cross-checking, and a candidate evaluated by the code that produced the
+problem cannot disagree with it.
+
+The arithmetic is reimplemented from `app/services/scoring.py`'s formula
+and is **self-checking**: candidate A must reproduce the stored
+`final_score` from the stored signal columns before any other candidate
+is printed.
+
+```
+rows compared      : 294
+mismatches         : 0
+worst difference   : 1.110e-16
+```
+
+Machine epsilon. The reimplementation is right, so the candidates are
+computed on the same basis as the rows.
+
+### What abstains
+
+294 pairs, 98 jobs, 3 users, `scoring_run_id 4`.
+
+`weight_covered` distribution: **0.35 ×46, 0.50 ×242, 0.80 ×6** — still
+three values, the step function the Day 9 probe found, now over 294 rows
+instead of 98.
+
+| signal | weight | pairs abstained | distinct jobs | % of pairs |
+|---|---|---|---|---|
+| semantic | 0.20 | 0 | 0 | 0.0% |
+| skill | 0.30 | 288 | 96 | 98.0% |
+
+(experience, location and title follow in the script's output.)
+
+### The candidates
+
+| candidate | floor | pass_final | pass_sem | pass_cov | **eligible** |
+|---|---|---|---|---|---|
+| A as-is | 0.55 ← current | 3 | 33 | 6 | **0** |
+| A as-is | 0.50 | 3 | 33 | 248 | **2** |
+| A as-is | 0.45 / 0.40 | 3 | 33 | 248 | **2** |
+| A as-is | 0.35 / 0.30 | 3 | 33 | 294 | **2** |
+| B abstain in denominator | any of 0.55 … 0.30 | **0** | 33 | 294 | **0** |
+
+Under B the coverage gate can never bind — coverage is 1.0 by
+construction — so the whole problem moves onto `final_score`, and no row
+clears 0.7.
+
+Rows failing exactly one gate, candidate A: at 0.55, **2** blocked by
+coverage alone; at 0.50 and below, **28** blocked by `final_score` alone
+and **1** by semantic alone. Consistent with the Day 9 probe's finding
+that final score is materially more constraining than semantic once
+coverage stops binding, now at 3× the sample.
+
+### No recommendation
+
+Deliberately none, and the script prints none. Design Note §10's
+reasoning holds: deciding this under time pressure is how it gets
+patched instead of decided. What Day 11 now has is the shape of the
+trade-off — that the asymmetry is load-bearing for reachability, that
+candidate B needs the *threshold* moved and not the floor, and that 2 is
+the most any coverage change alone can produce on this data.

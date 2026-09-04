@@ -11,3 +11,8 @@ __pycache__/
 run_log.txt
 storage/
 *.zip
+
+# Unattended run logs. Gitignored deliberately: an unattended log is
+# the one file nobody reviews before packing, and scripts/pack.ps1 can
+# only exclude what git already ignores.
+logs/
