@@ -749,9 +749,21 @@ async def run_scoring(
                 counters={
                     "users_considered": counters.users_considered,
                     "users_skipped_no_cv": counters.users_skipped_no_cv,
-                    "users_skipped_no_profile": counters.users_skipped_no_profile,
-                    "users_skipped_no_active_cv": counters.users_skipped_no_active_cv,
-                    "users_skipped_cv_not_embedded": counters.users_skipped_cv_not_embedded,
+                    # The three-way breakdown is deliberately NOT written
+                    # here. ScoringRunRepository.finish() compiles this dict
+                    # straight into update(ScoringRun).values(**counters), so
+                    # a key with no column on scoring_runs raises
+                    # CompileError: Unconsumed column names -- which is what
+                    # it did on the first non-dry run after the breakdown was
+                    # added, because the suite has no database and every live
+                    # check until then had been --dry-run.
+                    #
+                    # The breakdown IS persisted, in agent_runs, which has all
+                    # three columns and a drift test holding them in step with
+                    # build_run_summary(). Adding them to scoring_runs as well
+                    # would be a second copy of the same numbers in a table
+                    # whose funnel does not assert them. See the Day 10 Part 3
+                    # record; adding the columns there instead remains open.
                     "users_scored": counters.users_scored,
                     "jobs_considered": counters.jobs_considered,
                     "jobs_skipped_no_embedding": counters.jobs_skipped_no_embedding,

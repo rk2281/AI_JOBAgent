@@ -22,6 +22,10 @@ EXPECTED_TABLES = {
     "recommendations",
     "notifications",
     "user_feedback",
+    # Day 10: one row per workflow graph run. Added here deliberately --
+    # this assertion is `==` rather than `<=` precisely so a new table
+    # cannot appear without somebody acknowledging it.
+    "agent_runs",
 }
 
 

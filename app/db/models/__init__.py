@@ -6,6 +6,7 @@ this to detect the full schema.
 """
 
 from app.db.base import Base
+from app.db.models.agent import AgentRun
 from app.db.models.cv import CV, CVVersion, ExtractionStatus
 from app.db.models.embedding import EmbeddingRun, EmbeddingStatus
 from app.db.models.ingestion import IngestionReject, IngestionRun, IngestionStatus
@@ -23,6 +24,7 @@ from app.db.models.skill import Skill
 from app.db.models.user import OnboardingState, User, UserPreference
 
 __all__ = [
+    "AgentRun",
     "Base",
     "CV",
     "CVVersion",

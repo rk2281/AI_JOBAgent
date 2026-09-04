@@ -52,7 +52,8 @@ if sys.platform == "win32":
 
 from datetime import datetime, timezone  # noqa: E402
 
-from app.db.session import dispose_engine, init_engine  # noqa: E402
+from app.db.repositories.agent import AgentRunRepository  # noqa: E402
+from app.db.session import dispose_engine, init_engine, session_scope  # noqa: E402
 from app.workflows.graph import build_graph  # noqa: E402
 from app.workflows.state import build_run_summary, initial_state  # noqa: E402
 
@@ -132,8 +133,33 @@ async def run(args: argparse.Namespace) -> int:
         started_at=datetime.now(timezone.utc).isoformat(),
     )
 
+    # The row is opened BEFORE the graph runs and completed after, rather
+    # than written once at the end. A workflow run is the longest thing
+    # this project does -- an enrichment pass alone can take 27 to 84
+    # minutes -- and it is about to be driven by a scheduler with nobody
+    # watching. The run most worth having a record of is the one that did
+    # not reach the end, and a single write at the end produces no record
+    # of exactly that run. See AgentRunRepository.
+    #
+    # Persisted here rather than inside a node because app/workflows/
+    # imports no repository, deliberately (CLAUDE.md section 1). The
+    # driver owns the database; the graph owns the decisions.
+    run_id: int | None = None
+    if not args.dry_run:
+        async with session_scope() as session:
+            run = await AgentRunRepository(session).start(state["started_at"])
+            run_id = run.id
+
     final = await build_graph().ainvoke(state)
     summary = build_run_summary(final)
+
+    # A dry run writes no row at all. One saying writes_prevented=true
+    # would itself be a write the run promised not to make, and the
+    # contradiction would sit in the same record it was contradicting.
+    if run_id is not None:
+        async with session_scope() as session:
+            await AgentRunRepository(session).finish(run_id, summary)
+
     _print_summary(summary)
 
     # A non-zero exit for the two statuses that mean something went
