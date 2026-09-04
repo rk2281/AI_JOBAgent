@@ -228,6 +228,70 @@ def select_status(
     return ScoringStatus.COMPLETE_NO_QUALIFYING
 
 
+def build_scoring_run_counters(
+    counters: _Counters,
+    *,
+    semantic_raw_min: float | None,
+    semantic_raw_max: float | None,
+    semantic_raw_median: float | None,
+    score_min: float | None,
+    score_max: float | None,
+    score_median: float | None,
+    distinct_score_count: int,
+) -> dict:
+    """Exactly what run_scoring writes to scoring_runs. Pure, no session.
+
+    A seam, and it exists for one reason: ScoringRunRepository.finish()
+    compiles this dict straight into update(ScoringRun).values(**counters),
+    so a key with no column does not get skipped -- it raises CompileError:
+    Unconsumed column names. That is what the first non-dry run after the
+    skip breakdown was added did, and it survived Part 1, Part 2 and a
+    commit because the suite has no database and every live check until
+    then had been --dry-run.
+
+    Inline in run_scoring this dict was unreachable without a database,
+    so nothing could assert it against the schema. Lifted out, it is
+    testable with no session at all -- the same move, and the same
+    argument, as build_run_summary(state) in app/workflows/state.py.
+
+    The three-way skip breakdown is deliberately NOT here. It has no
+    columns on scoring_runs; it is persisted in agent_runs, which does
+    have them and has a drift test holding them in step with the
+    summary. Adding the columns here as well would be a second copy of
+    the same numbers in a table whose funnel does not assert them, and
+    remains open -- see the Day 10 Part 3 record.
+    """
+    return {
+        "users_considered": counters.users_considered,
+        "users_skipped_no_cv": counters.users_skipped_no_cv,
+        "users_scored": counters.users_scored,
+        "jobs_considered": counters.jobs_considered,
+        "jobs_skipped_no_embedding": counters.jobs_skipped_no_embedding,
+        "jobs_excluded_manual": counters.jobs_excluded_manual,
+        "jobs_scored": counters.jobs_scored,
+        "pairs_scored": counters.pairs_scored,
+        "abstain_semantic": counters.abstain_semantic,
+        "abstain_skill": counters.abstain_skill,
+        "abstain_experience": counters.abstain_experience,
+        "abstain_location": counters.abstain_location,
+        "abstain_title": counters.abstain_title,
+        "semantic_clamped_low": counters.semantic_clamped_low,
+        "semantic_clamped_high": counters.semantic_clamped_high,
+        "semantic_raw_min": semantic_raw_min,
+        "semantic_raw_max": semantic_raw_max,
+        "semantic_raw_median": semantic_raw_median,
+        "quality_penalty_agency": counters.quality_penalty_agency,
+        "quality_penalty_no_city": counters.quality_penalty_no_city,
+        "jobs_remote": counters.jobs_remote,
+        "jobs_hybrid": counters.jobs_hybrid,
+        "score_min": score_min,
+        "score_max": score_max,
+        "score_median": score_median,
+        "distinct_score_count": distinct_score_count,
+        "notify_eligible": counters.notify_eligible,
+    }
+
+
 # The three reasons a user is not scorable. Strings rather than an enum
 # because these travel into a JSONB counters column and out to a
 # script's stdout; an enum would be re-serialised at both ends, and the
@@ -746,50 +810,16 @@ async def run_scoring(
                 run_id=run_id,
                 status=status.value,
                 finished_at=datetime.now(timezone.utc),
-                counters={
-                    "users_considered": counters.users_considered,
-                    "users_skipped_no_cv": counters.users_skipped_no_cv,
-                    # The three-way breakdown is deliberately NOT written
-                    # here. ScoringRunRepository.finish() compiles this dict
-                    # straight into update(ScoringRun).values(**counters), so
-                    # a key with no column on scoring_runs raises
-                    # CompileError: Unconsumed column names -- which is what
-                    # it did on the first non-dry run after the breakdown was
-                    # added, because the suite has no database and every live
-                    # check until then had been --dry-run.
-                    #
-                    # The breakdown IS persisted, in agent_runs, which has all
-                    # three columns and a drift test holding them in step with
-                    # build_run_summary(). Adding them to scoring_runs as well
-                    # would be a second copy of the same numbers in a table
-                    # whose funnel does not assert them. See the Day 10 Part 3
-                    # record; adding the columns there instead remains open.
-                    "users_scored": counters.users_scored,
-                    "jobs_considered": counters.jobs_considered,
-                    "jobs_skipped_no_embedding": counters.jobs_skipped_no_embedding,
-                    "jobs_excluded_manual": counters.jobs_excluded_manual,
-                    "jobs_scored": counters.jobs_scored,
-                    "pairs_scored": counters.pairs_scored,
-                    "abstain_semantic": counters.abstain_semantic,
-                    "abstain_skill": counters.abstain_skill,
-                    "abstain_experience": counters.abstain_experience,
-                    "abstain_location": counters.abstain_location,
-                    "abstain_title": counters.abstain_title,
-                    "semantic_clamped_low": counters.semantic_clamped_low,
-                    "semantic_clamped_high": counters.semantic_clamped_high,
-                    "semantic_raw_min": semantic_raw_min,
-                    "semantic_raw_max": semantic_raw_max,
-                    "semantic_raw_median": semantic_raw_median,
-                    "quality_penalty_agency": counters.quality_penalty_agency,
-                    "quality_penalty_no_city": counters.quality_penalty_no_city,
-                    "jobs_remote": counters.jobs_remote,
-                    "jobs_hybrid": counters.jobs_hybrid,
-                    "score_min": score_min,
-                    "score_max": score_max,
-                    "score_median": score_median,
-                    "distinct_score_count": distinct_score_count,
-                    "notify_eligible": counters.notify_eligible,
-                },
+                counters=build_scoring_run_counters(
+                    counters,
+                    semantic_raw_min=semantic_raw_min,
+                    semantic_raw_max=semantic_raw_max,
+                    semantic_raw_median=semantic_raw_median,
+                    score_min=score_min,
+                    score_max=score_max,
+                    score_median=score_median,
+                    distinct_score_count=distinct_score_count,
+                ),
             )
 
     return {
