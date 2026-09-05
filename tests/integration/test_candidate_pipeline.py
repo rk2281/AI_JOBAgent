@@ -293,3 +293,77 @@ def test_a_corrupted_file_fails_without_taking_the_process_with_it(
     # sends the next person to the logs for a run that may be days old.
     assert observed["cv_error"]
     assert client.seen_text is None
+
+
+def test_a_nul_byte_in_the_text_layer_reaches_the_database_cleaned(
+    run_with_database: Callable[[Callable[[], Awaitable[Any]]], Any],
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The production failure of 2026-09-05, executed against PostgreSQL.
+
+    A real CV's PDF text layer contained `\\x00` where the "+" of an
+    international phone number belonged. `extract_cv` died in its THIRD
+    phase -- after the Gemini call had been spent -- with
+
+        psycopg.DataError: PostgreSQL text fields cannot contain NUL
+
+    Only a real database raises that. No unit test could have caught
+    it, which is the same reason this directory exists.
+
+    The pdf extractor is stubbed because a .docx cannot carry a NUL and
+    building a PDF whose font tables produce one is not worth it; what
+    matters here is that the value which reaches `cvs.raw_text` and
+    `cv_versions.extracted_profile` is accepted by the columns.
+    """
+    import app.services.cv_text as cv_text
+
+    storage_path = tmp_path / "varun_cv.pdf"
+    storage_path.write_bytes(b"%PDF-1.4 stub")
+
+    dirty = "VARUN NARAD\nCybersecurity Engineer\n\x00918700430994"
+    monkeypatch.setattr(cv_text, "_extract_pdf_text", lambda data: dirty)
+
+    client = FakeGeminiClient()
+
+    async def body() -> dict[str, Any]:
+        async with session_scope() as session:
+            user = User(telegram_id=900004, full_name="Varun Narad")
+            session.add(user)
+            await session.flush()
+            session.add(
+                CV(
+                    user_id=user.id,
+                    file_name="varun_cv.pdf",
+                    file_type="pdf",
+                    storage_path=str(storage_path),
+                    extraction_status=ExtractionStatus.PENDING.value,
+                )
+            )
+            user_id = user.id
+
+        result = await extract_cv(user_id, gemini_client=client)
+
+        async with session_scope() as session:
+            cv = (await session.execute(select(CV))).scalar_one()
+            version = (await session.execute(select(CVVersion))).scalar_one()
+            return {
+                "result": result,
+                "cv_status": cv.extraction_status,
+                "raw_text": cv.raw_text,
+                "extracted_profile": version.extracted_profile,
+            }
+
+    observed = run_with_database(body)
+
+    assert observed["result"].status is ExtractionStatus.COMPLETE
+    assert observed["cv_status"] == ExtractionStatus.COMPLETE.value
+
+    # Stored, and clean. Before the fix this row did not exist at all.
+    assert "\x00" not in observed["raw_text"]
+    assert "918700430994" in observed["raw_text"]
+
+    # The model saw the cleaned text, so the JSONB column is safe too.
+    assert client.seen_text is not None
+    assert "\x00" not in client.seen_text
+    assert "\x00" not in str(observed["extracted_profile"])
