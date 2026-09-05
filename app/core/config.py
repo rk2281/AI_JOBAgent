@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     debug: bool = True
 
     telegram_bot_token: str = ""
+
+    # "polling" or "disabled". Validated below -- see
+    # _check_telegram_mode_is_recognised for why an unknown value is
+    # fatal rather than ignored.
     telegram_mode: str = "polling"
 
     database_url: str = ""
@@ -517,6 +521,55 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def _check_telegram_mode_is_recognised(self) -> "Settings":
+        """Fail at import on a telegram_mode this application cannot serve.
+
+        `app/main.py` starts the bot on exactly one value, `"polling"`,
+        and does nothing at all for every other string. So before Day 12
+        `TELEGRAM_MODE=poling` -- or `webhook`, which reads like a
+        supported alternative and is not implemented anywhere -- started
+        the API cleanly, served `/health` with `status: ok`, reported
+        `telegram.configured: true` on `/health/ready` because a token
+        was present, and never answered a single message. Nothing logged
+        anything. CLAUDE.md section 0: state what it looks like when the
+        work silently does nothing, and here it looked like a healthy
+        service.
+
+        `"webhook"` is rejected by name with its own message rather than
+        falling into the generic one, because the generic message would
+        read as "typo" for a value that is actually a feature request.
+
+        Raising `ValueError` rather than warning: the process that
+        cannot deliver a notification should not be the process that
+        reports itself ready to.
+        """
+        RECOGNISED = ("polling", "disabled")
+
+        mode = self.telegram_mode.strip().lower()
+
+        if mode == "webhook":
+            raise ValueError(
+                "TELEGRAM_MODE=webhook is not implemented. app/main.py "
+                "exposes no webhook route and starts no bot in this "
+                "mode, so the API would run without ever receiving an "
+                "update. Use 'polling', or 'disabled' to run the API "
+                "with the bot deliberately off."
+            )
+
+        if mode not in RECOGNISED:
+            raise ValueError(
+                f"TELEGRAM_MODE={self.telegram_mode!r} is not "
+                f"recognised. Expected one of {RECOGNISED}. An "
+                "unrecognised mode starts the API with no bot and no "
+                "error, which is indistinguishable from a bot that is "
+                "running and silent."
+            )
+
+        self.telegram_mode = mode
+
+        return self
 
     @model_validator(mode="after")
     def _check_weights_sum_to_one(self) -> "Settings":

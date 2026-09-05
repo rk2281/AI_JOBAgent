@@ -7,7 +7,15 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -133,6 +141,16 @@ class CVVersion(Base, TimestampMixin):
     __tablename__ = "cv_versions"
     __table_args__ = (
         UniqueConstraint("cv_id", "version", name="uq_cv_version"),
+        # Day 12. Created by migration 563b5bb86690 with raw SQL, never
+        # declared here. See the longer note in app/db/models/job.py:
+        # an index the metadata does not know about is an index
+        # `alembic revision --autogenerate` will offer to drop.
+        Index(
+            "ix_cv_versions_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

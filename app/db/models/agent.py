@@ -62,7 +62,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -206,5 +206,16 @@ class AgentRun(Base):
     # when or why. Invisible is worse than wrong.
     notifications_users_deactivated: Mapped[int | None] = mapped_column(Integer)
 
-    __table_args__ = ({"comment": "One row per workflow graph run. See app/db/models/agent.py."},)
+    __table_args__ = (
+        # Day 12. Created by migration b3f7c21d9e40, never declared here.
+        # This is the index that finds a run killed mid-flight, so it is
+        # exactly the object whose silent disappearance would be noticed
+        # only on the day somebody needed it. See app/db/models/job.py.
+        Index(
+            "ix_agent_runs_unfinished",
+            "started_at",
+            postgresql_where=text("finished_at IS NULL"),
+        ),
+        {"comment": "One row per workflow graph run. See app/db/models/agent.py."},
+    )
 

@@ -170,8 +170,8 @@ the end, and returns a dict of counters. `run_ingestion`,
 
 |                             |                                                                                 |
 | --------------------------- | ------------------------------------------------------------------------------- |
-| Alembic head                | `c8e2a15f4b93` — 10 migrations                                                  |
-| Tests                       | 664 passing (556 before Day 11)                                                 |
+| Alembic head                | `c8e2a15f4b93` — 10 migrations; `alembic check` clean as of Day 12              |
+| Tests                       | 729 passing with a database, 706 + 23 skipped without (664 before Day 12)       |
 | Workflow                    | `app/workflows/` — 8 nodes, 3 conditional edges; runs persisted to `agent_runs` |
 | Jobs                        | 99, all embedded, 1 excluded (job 2)                                            |
 | CV versions                 | 3 active, all embedded                                                          |
@@ -528,3 +528,113 @@ Multi-step work is written as staged prompts with hard rules at the
 top, exact file paths, exact find/replace strings, a table of expected
 test values, and explicit verification commands. **Stop and report
 between stages.** Do not run stage 3 because stage 2 looked fine.
+
+---
+
+## 9. Day 12 — completion, verification and finalisation
+
+Day 12 was an audit-and-verify phase, not a feature phase. No feature
+was added. What changed is that claims which had never been executed
+are now executed, and three defects that every test had been passing
+over are fixed.
+
+### The one that matters most
+
+**A shared archive leaked `.env`, `storage/cvs/` (21 real candidate CV
+PDFs) and `logs/` for the THIRD time.** `pack.ps1` was not broken; it
+was bypassed again. The four credentials have now left the machine
+three times and have never been rotated. Rotate Adzuna first — its
+credentials travel in a query string. A key can be rotated; a CV
+cannot be recalled.
+
+`scripts/verify_archive.py` and its `.ps1` wrapper now exist, which is
+the "named, not built" item from the Day 10 Part 3 record. Pointed at
+the offending archive it exits 1 and names every entry.
+
+### Closed by Day 12
+
+- **The ORM metadata had drifted four objects from the migrated
+  schema, and `alembic revision --autogenerate` would have dropped
+  them.** `alembic check` had never been run. It proposed removing
+  `uq_job_content_hash`, `ix_jobs_embedding_hnsw`,
+  `ix_cv_versions_embedding_hnsw` and `ix_agent_runs_unfinished`.
+  Dropping the first removes ingestion's duplicate defence with no test
+  failing, because the suite had no database. All four are now declared
+  in `__table_args__` — no DDL change, the objects already exist — and
+  `alembic check` reports no operations. **`content_hash` is no longer
+  `index=True` on the model**; migration `d7a3f1c92b40` replaced that
+  index with a unique constraint on Day 6 and the model was never
+  updated.
+- **The test suite was polling the production Telegram bot.**
+  `tests/test_health.py` ran the real lifespan, which found
+  `TELEGRAM_MODE=polling` and a real token and called `initialize()`
+  and `start_polling()`. Telegram allows one `getUpdates` consumer per
+  bot, so `pytest` raced the real bot and any update the test process
+  won was acknowledged and gone. All three tests passed throughout.
+  Fixed structurally by `tests/conftest.py`, which pins a hermetic
+  environment before any `app.*` import. Do NOT replace this with a
+  pytest check inside `lifespan`: that makes the tested startup path
+  differ from the shipped one.
+- **A signal scoring 0.0 was claiming a match.** `score_title` returned
+  "title overlaps a target role" unconditionally, so a stored row could
+  read `title_score = 0.0` beside a reason asserting a match.
+  `match_reasons` is user-facing, so that was a false claim made to a
+  person. The reason now branches on the value. The value, the weight
+  and every gate are unchanged — turning a 0.0 into an abstain would
+  have been a model change dressed as a text fix.
+- **An unrecognised `TELEGRAM_MODE` is now fatal.** `poling` used to
+  start the API cleanly, serve `/health` as `ok`, report
+  `telegram.configured: true` and never answer a message. `webhook` is
+  rejected by name because no webhook route exists anywhere.
+- **Integration tests exist — 23 of them, against a real PostgreSQL.**
+  They cover all five pipelines and execute the two failure shapes this
+  project has actually paid for: a summary key with no column, and a
+  counters dict compiled into an UPDATE. Migrations run through the
+  alembic CLI in a subprocess, because that is the command a human
+  runs.
+- **The notify branch has executed.** Not on live data — on a fixture
+  built to clear all three gates. It writes an attempt row, transitions
+  it to `SENT`, and the second pass selects nothing.
+- **`scripts/check_run_freshness.py`** answers "did the nightly run
+  happen", by looking at `agent_runs` rather than at the scheduler.
+  Three states, because a new deployment and a dead scheduler both have
+  no recent run and only one is an incident. Window 26 hours, compared
+  with `<=`, tested at exactly the boundary.
+- **`scripts/e2e_verify.py`** drives one candidate through all 17
+  stages and prints a trace labelling each REAL or STAND-IN.
+
+### Do not "fix" these either — additions to section 1
+
+| Observation                                                                                       | Looks like                        | Actually                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/conftest.py` sets environment variables at import, before any import of `app`              | import-order fragility to tidy up | load-bearing. pydantic-settings ranks OS environment above `.env`, and `Settings` is a cached singleton built on first import. Move these below an `app.*` import and the suite silently polls the production bot again. `tests/test_test_environment.py` is what notices |
+| the environment guards live in `test_test_environment.py`, not in `conftest.py` where they belong | misplaced, move them              | pytest IMPORTS `conftest.py` but does not COLLECT tests from it. Written there they ran zero times while the suite reported clean — the exact mistake they exist to catch                                                                                                 |
+| `Index("ix_jobs_embedding_hnsw", ...)` in a model, when a migration already creates it            | duplicated DDL, delete one        | the migration CREATES it; the model DECLARES it so autogenerate does not offer to drop it. Deleting either one has a different and worse failure                                                                                                                          |
+| integration tests report `23 skipped` on a normal run                                             | tests quietly disabled            | they need `TEST_DATABASE_URL`. Nothing inside pytest can make an absent database loud, which is why `docs/TEST_RESULTS.md` records the with- and without-database figures separately                                                                                      |
+| `test_logs_are_deliberately_absent_from_both_lists` asserts that `logs/` is NOT blocked           | an inverted test                  | it pins a known gap so that closing it is a deliberate change to three files rather than a silent drift. See "Open after Day 12"                                                                                                                                          |
+
+### Open after Day 12
+
+- **CREDENTIAL ROTATION IS STILL NOT DONE. Incident twelve.** Nothing
+  in this repository can fix this.
+- **`logs/` is gitignored but not forbidden.** Neither `pack.ps1` nor
+  `verify_archive.py` blocks it, and the incident archive contained it.
+  An unattended log is the one file nobody reviews before packing.
+  **Needs a decision**, in three places at once.
+- **The graph cannot run non-dry without Telegram.** The `notify` node
+  builds a real `TelegramNotifier`; `deliver_notifications` accepts an
+  injectable one but nothing threads it through. Not fixed —
+  threading a test seam through the graph would change production
+  wiring to suit a test.
+- **Adzuna, Gemini and Telegram remain NOT VERIFIED end to end.** No
+  egress during Day 12. Every rule around them is tested; no socket was
+  opened.
+- **The scheduler has still never been observed to fire.**
+  `check_run_freshness` now makes a missed run visible, but nothing
+  runs `check_run_freshness`.
+- **The abstention asymmetry is still measured and undecided.** Day 12
+  added eleven tests stating each property in words and changed no
+  arithmetic. `docs/MATCHING_AND_SCORING.md` holds the closed form.
+- **Windows-specific paths were not exercised.** Day 12 verification
+  ran on Linux, so `pack.ps1`, `schedule_agent.ps1` and
+  `verify_archive.ps1` were not executed. The Python they call was.

@@ -8,6 +8,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -28,6 +29,32 @@ class Job(Base, TimestampMixin):
     __tablename__ = "jobs"
     __table_args__ = (
         UniqueConstraint("source", "external_id", name="uq_job_source_external"),
+        # Day 12. Both of the objects below already exist in the database
+        # and are created by migrations; neither was declared here. That
+        # gap is not cosmetic. `alembic revision --autogenerate` compares
+        # the DATABASE against THIS metadata, so an object the metadata
+        # does not know about reads as an object somebody dropped by
+        # hand, and the generated migration helpfully drops it for real.
+        #
+        # Run on 2026-09-05 against a schema built from these migrations,
+        # `alembic check` proposed exactly that: remove uq_job_content_hash,
+        # remove ix_jobs_embedding_hnsw, remove ix_cv_versions_embedding_hnsw,
+        # remove ix_agent_runs_unfinished. Dropping the unique constraint
+        # is the dangerous one -- ingestion's duplicate defence would be
+        # gone, no test would fail (the suite has no database), and the
+        # symptom would be duplicate jobs appearing weeks later.
+        #
+        # Declaring them keeps the metadata honest. It changes no DDL:
+        # the constraint and the index are already in the database, so
+        # this makes `alembic check` pass rather than making it produce
+        # a migration.
+        UniqueConstraint("content_hash", name="uq_job_content_hash"),
+        Index(
+            "ix_jobs_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -54,7 +81,11 @@ class Job(Base, TimestampMixin):
 
     content_hash: Mapped[str | None] = mapped_column(
         String(64),
-        index=True,
+        # NOT index=True. Migration d7a3f1c92b40 dropped the plain index
+        # this once declared and created uq_job_content_hash in its
+        # place, promoting the hash from a stored value into an enforced
+        # identity. The model kept saying "index"; the database has said
+        # "unique constraint" since Day 6. See __table_args__.
     )
 
     last_seen_at: Mapped[datetime | None] = mapped_column(

@@ -250,4 +250,25 @@ def score_title(job_title: str | None, target_roles: list[str]) -> SignalScore:
         overlap = role_tokens & title_tokens
         best = max(best, len(overlap) / len(role_tokens))
 
+    # The reason has to branch on the value. Day 12 found a stored
+    # recommendation reading `title_score = 0.0` alongside
+    # "title overlaps a target role" -- for "NLP Engineer" against
+    # ["AI Engineer", "ML Engineer", "Machine Learning Engineer"],
+    # where every shared word is a weak token and the real overlap is
+    # empty. The NUMBER was right; the sentence next to it was not.
+    #
+    # This matters more than it looks. match_reasons is the "match
+    # explanation" a user is shown, so the wrong text here is a claim
+    # made to a person, not an internal label -- and it is invisible
+    # unless somebody reads the reason and the score in the same
+    # query, which is how it was found.
+    #
+    # Only the string changes. The value, the weight, weight_covered
+    # and every gate are untouched: a 0.0 title score still SCORES
+    # zero rather than abstaining, because "we compared and they do
+    # not match" is a real answer and turning it into an abstain would
+    # be a change to the model.
+    if best == 0.0:
+        return SignalScore(0.0, "title shares no words with any target role")
+
     return SignalScore(best, "title overlaps a target role")
