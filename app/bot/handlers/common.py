@@ -7,21 +7,21 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.bot.commands import COMMANDS
+
 logger = logging.getLogger(__name__)
 
 
+# One line per app.bot.commands.COMMANDS entry, generated rather than
+# hand-typed a second time — see that module's docstring for why.
+_COMMAND_LINES = "\n".join(f"/{c.name} — {c.description}" for c in COMMANDS)
+
 HELP_TEXT = (
-    "*What I do*\n"
+    "What I do\n"
     "I read your CV, learn what you're looking for, and message you when "
     "a matching job appears.\n\n"
-    "*Commands*\n"
-    "/start — begin or resume setup\n"
-    "/status — see what I have on file\n"
-    "/profile — see what I understood from your CV\n"
-    "/update_cv — replace your CV\n"
-    "/restart — redo setup from the beginning\n"
-    "/help — this message\n"
-    "/ping — check I'm alive\n\n"
+    "Commands\n"
+    f"{_COMMAND_LINES}\n\n"
     "You can send a new CV at any time to replace the one I have."
 )
 
@@ -32,7 +32,17 @@ async def help_command(
 ) -> None:
     if update.message is None:
         return
-    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+
+    # No parse_mode. HELP_TEXT is generated from app.bot.commands.COMMANDS,
+    # and every command name is a plain identifier -- /update_cv's
+    # underscore opened an unclosed italic entity under Telegram's legacy
+    # Markdown parser and crashed every /help reply in production
+    # (2026-09-05). Not escaped: escaping keeps the trap armed for the
+    # next command name with an underscore. Slash commands already
+    # render as tappable links without any markup, so there is nothing
+    # bold or italic here worth the risk. Same reasoning as
+    # app/bot/handlers/profile.py's profile_command.
+    await update.message.reply_text(HELP_TEXT)
 
 
 async def ping_command(

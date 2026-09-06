@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from telegram import BotCommand
 
 from app.bot.application import create_bot_application
+from app.bot.commands import COMMANDS
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db.session import (
@@ -28,6 +30,19 @@ async def lifespan(app: FastAPI):
             telegram_application = create_bot_application()
 
             await telegram_application.initialize()
+
+            # Populates the "/" menu in Telegram clients. Placed here
+            # rather than in create_bot_application(): that function is
+            # synchronous and does no I/O, which is what lets
+            # register_handlers() be tested against a fake Application
+            # with no network or event loop. set_my_commands is a real
+            # Bot API call, so it belongs alongside the other startup
+            # network actions below, after initialize() has built the
+            # bot's session.
+            await telegram_application.bot.set_my_commands(
+                [BotCommand(command.name, command.description) for command in COMMANDS]
+            )
+
             await telegram_application.start()
 
             if telegram_application.updater is not None:

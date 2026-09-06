@@ -87,6 +87,25 @@ class DocumentOutcome:
     user_id: int | None = None
 
 
+@dataclass(frozen=True)
+class CallbackOutcome:
+    """What handling one button tap produced.
+
+    `answered` is True only when the tap actually advanced onboarding
+    to the next step — not when it was unrecognised, from an earlier
+    step, or carried a value outside the fixed set a button could ever
+    send. The handler uses it to decide whether to echo the tapped
+    choice onto the question it answered: echoing a choice that was
+    never saved would show the user something false. Same shape as
+    DocumentOutcome.stored above, for the same reason — a plain
+    BotReply cannot carry this distinction without the caller guessing
+    it from the wording.
+    """
+
+    reply: BotReply
+    answered: bool = False
+
+
 def parse_list_input(raw: str) -> list[str]:
     """Turn "Backend Engineer, ML engineer , backend engineer" into a list.
 
@@ -345,7 +364,7 @@ class OnboardingService:
             )
         )
 
-    async def handle_callback(self, telegram_id: int, data: str) -> BotReply:
+    async def handle_callback(self, telegram_id: int, data: str) -> CallbackOutcome:
         """Route an inline-button tap.
 
         Callback data looks like "onb:remote:yes". The state is re-read
@@ -355,12 +374,14 @@ class OnboardingService:
         """
         user = await self._users.get_by_telegram_id(telegram_id)
         if user is None:
-            return await self.start(telegram_id, None, None)
+            return CallbackOutcome(reply=await self.start(telegram_id, None, None))
 
         parts = data.split(":")
         if len(parts) != 3 or parts[0] != CALLBACK_PREFIX:
             logger.warning("Unrecognised callback data: %s", data)
-            return BotReply(text="That button has expired. Send /start.")
+            return CallbackOutcome(
+                reply=BotReply(text="That button has expired. Send /start.")
+            )
 
         _, step, value = parts
         state = OnboardingState(user.onboarding_state)
@@ -372,13 +393,17 @@ class OnboardingService:
         }.get(step)
 
         if expected is None:
-            return BotReply(text="That button has expired. Send /start.")
+            return CallbackOutcome(
+                reply=BotReply(text="That button has expired. Send /start.")
+            )
 
         if state is not expected:
             prompt = self._prompt_for(state)
-            return BotReply(
-                text="That button is from an earlier step.\n\n" + prompt.text,
-                buttons=prompt.buttons,
+            return CallbackOutcome(
+                reply=BotReply(
+                    text="That button is from an earlier step.\n\n" + prompt.text,
+                    buttons=prompt.buttons,
+                )
             )
 
         if step == "remote":
@@ -431,7 +456,7 @@ class OnboardingService:
             buttons=prompt.buttons,
         )
 
-    async def _save_remote(self, user: User, remote_only: bool) -> BotReply:
+    async def _save_remote(self, user: User, remote_only: bool) -> CallbackOutcome:
         preferences = await self._users.get_or_create_preferences(user.id)
         preferences.remote_only = remote_only
         await self._session.flush()
@@ -442,15 +467,20 @@ class OnboardingService:
 
         prompt = self._prompt_for(OnboardingState.AWAITING_EXPERIENCE)
         answer = "Remote only." if remote_only else "Open to on-site roles."
-        return BotReply(
-            text=f"{answer}\n\n{prompt.text}",
-            buttons=prompt.buttons,
+        return CallbackOutcome(
+            reply=BotReply(
+                text=f"{answer}\n\n{prompt.text}",
+                buttons=prompt.buttons,
+            ),
+            answered=True,
         )
 
-    async def _save_experience(self, user: User, choice: str) -> BotReply:
+    async def _save_experience(self, user: User, choice: str) -> CallbackOutcome:
         bracket = EXPERIENCE_CHOICES.get(choice)
         if bracket is None:
-            return BotReply(text="That option isn't one I recognise. Send /start.")
+            return CallbackOutcome(
+                reply=BotReply(text="That option isn't one I recognise. Send /start.")
+            )
 
         minimum, maximum = bracket
 
@@ -464,15 +494,20 @@ class OnboardingService:
         )
 
         prompt = self._prompt_for(OnboardingState.AWAITING_THRESHOLD)
-        return BotReply(
-            text=f"{choice} years of experience.\n\n{prompt.text}",
-            buttons=prompt.buttons,
+        return CallbackOutcome(
+            reply=BotReply(
+                text=f"{choice} years of experience.\n\n{prompt.text}",
+                buttons=prompt.buttons,
+            ),
+            answered=True,
         )
 
-    async def _save_threshold(self, user: User, choice: str) -> BotReply:
+    async def _save_threshold(self, user: User, choice: str) -> CallbackOutcome:
         threshold = THRESHOLD_CHOICES.get(choice)
         if threshold is None:
-            return BotReply(text="That option isn't one I recognise. Send /start.")
+            return CallbackOutcome(
+                reply=BotReply(text="That option isn't one I recognise. Send /start.")
+            )
 
         preferences = await self._users.get_or_create_preferences(user.id)
         preferences.notification_threshold = threshold
@@ -480,15 +515,31 @@ class OnboardingService:
 
         await self._users.set_onboarding_state(user, OnboardingState.COMPLETE)
 
+        # Defensive, not routine: pending_preference_field can only be
+        # set by /preferences, which itself refuses unless
+        # onboarding_state is already COMPLETE -- so the normal path
+        # here finds nothing to clear. The one door that bypasses that
+        # guard is /restart, which resets onboarding_state without
+        # knowing this column exists (by design -- see the column's
+        # docstring on User). Clearing it here, at the one place
+        # onboarding_state ever transitions INTO COMPLETE, stops a
+        # marker orphaned by that path from surviving a full re-run of
+        # onboarding and hijacking the user's next ordinary message.
+        await self._users.set_pending_preference_field(user, None)
+
         logger.info("Onboarding complete for user_id=%s", user.id)
 
-        return BotReply(
-            text=(
-                "🎉 All set!\n\n"
-                f"I'll alert you about jobs scoring {threshold:.0%} or higher.\n\n"
-                "Use /status any time to review this, or /restart to change it. "
-                "Job matching goes live once ingestion is running."
-            )
+        return CallbackOutcome(
+            reply=BotReply(
+                text=(
+                    "🎉 All set!\n\n"
+                    f"I'll alert you about jobs scoring {threshold:.0%} or higher.\n\n"
+                    "Use /status any time to review this, /restart to change it, or "
+                    "/help to see everything I can do. "
+                    "Job matching goes live once ingestion is running."
+                )
+            ),
+            answered=True,
         )
 
     # -- prompts ----------------------------------------------------------

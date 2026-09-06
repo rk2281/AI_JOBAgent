@@ -25,10 +25,11 @@ import logging
 from telegram import Bot, Update
 from telegram.ext import ContextTypes
 
-from app.bot.rendering import to_markup
+from app.bot.rendering import tapped_button_label, to_markup
 from app.db.models.cv import ExtractionStatus
 from app.db.session import session_scope
 from app.services.cv_extraction import extract_cv
+from app.services.message_routing import route_text
 from app.services.onboarding import OnboardingService
 
 logger = logging.getLogger(__name__)
@@ -201,9 +202,17 @@ async def text_message(
         return
 
     async with session_scope() as session:
-        reply = await OnboardingService(session).handle_text(
-            telegram_id=update.effective_user.id,
-            text=update.message.text,
+        # route_text, not OnboardingService directly: a plain text
+        # message could be answering onboarding OR a /preferences edit
+        # in progress, and only the router knows which -- see its
+        # docstring for the tie-break. Keeping that decision out of
+        # this handler is what keeps it at "pull primitives, open a
+        # session, call a service, send the reply" like every other
+        # handler in this package.
+        reply = await route_text(
+            session,
+            update.effective_user.id,
+            update.message.text,
         )
 
     await update.message.reply_text(
@@ -227,21 +236,33 @@ async def button_callback(
     await query.answer()
 
     async with session_scope() as session:
-        reply = await OnboardingService(session).handle_callback(
+        outcome = await OnboardingService(session).handle_callback(
             telegram_id=update.effective_user.id,
             data=query.data or "",
         )
 
-    # Strip the keyboard off the message that was just answered, so an
-    # old question cannot be answered twice.
     if query.message is not None:
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            if outcome.answered:
+                # A genuine answer: fold the choice into the question it
+                # answered and drop the keyboard in the same edit, so
+                # scrolling back shows one bubble carrying both rather
+                # than a bare question with its buttons missing.
+                label = tapped_button_label(query)
+                text = query.message.text or ""
+                if label is not None:
+                    text = f"{text}\n\n✅ {label}"
+                await query.edit_message_text(text=text, reply_markup=None)
+            else:
+                # Stale or unrecognised tap: nothing was saved, so there
+                # is no choice to echo. Still strip the keyboard, so an
+                # old question cannot be answered twice.
+                await query.edit_message_reply_markup(reply_markup=None)
         except Exception:  # noqa: BLE001 - message may be too old to edit
-            logger.debug("Could not clear keyboard on message", exc_info=True)
+            logger.debug("Could not update answered message", exc_info=True)
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=reply.text,
-        reply_markup=to_markup(reply),
+        text=outcome.reply.text,
+        reply_markup=to_markup(outcome.reply),
     )

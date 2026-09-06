@@ -51,6 +51,26 @@ class OnboardingState(str, enum.Enum):
     COMPLETE = "complete"
 
 
+class PendingPreferenceField(str, enum.Enum):
+    """Which free-text preference question a user is mid-answering.
+
+    Not a step of OnboardingState, and not read the same way. This
+    exists purely to route the ONE ambiguous case a plain Telegram text
+    message creates: a bare string carries no callback_data to
+    dispatch on, so something has to remember which question it
+    answers. The two closed-choice preference fields (experience,
+    notification_threshold) never need this -- they resolve entirely
+    through chained callback_data on button taps, which already say
+    what they answer.
+
+    ROLES / LOCATIONS only, deliberately not a superset of every
+    editable preference.
+    """
+
+    ROLES = "roles"
+    LOCATIONS = "locations"
+
+
 class User(Base, TimestampMixin):
     """A person interacting with the bot, identified by Telegram ID."""
 
@@ -93,6 +113,23 @@ class User(Base, TimestampMixin):
         server_default=OnboardingState.NEW.value,
         nullable=False,
     )
+
+    # Which free-text preference question, if any, this user's next
+    # plain-text message will answer -- set only by /preferences, and
+    # only from behind an onboarding_state == COMPLETE check, because
+    # editing one preference presupposes onboarding already produced
+    # one. Orthogonal to onboarding_state: that column owns progress
+    # through first-time setup; this one owns a short-lived detour
+    # taken after setup is finished. They are not meant to both matter
+    # at once, and onboarding_state always wins if they do -- any value
+    # other than COMPLETE means this column is ignored outright
+    # regardless of what it holds, because /restart resets the former
+    # without knowing the latter exists. Cleared the instant an answer
+    # is saved, and cleared again on the transition into COMPLETE (in
+    # _save_threshold), so a value left over from an edit abandoned
+    # mid-/restart cannot reactivate and hijack a later, unrelated
+    # message.
+    pending_preference_field: Mapped[str | None] = mapped_column(String(32))
 
     profile: Mapped[Profile | None] = relationship(
         back_populates="user",

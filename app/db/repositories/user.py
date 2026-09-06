@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.user import OnboardingState, User, UserPreference
+from app.db.models.user import OnboardingState, PendingPreferenceField, User, UserPreference
 
 
 class UserRepository:
@@ -103,6 +103,20 @@ class UserRepository:
         state: OnboardingState,
     ) -> None:
         user.onboarding_state = state.value
+        await self._session.flush()
+
+    async def set_pending_preference_field(
+        self,
+        user: User,
+        field: PendingPreferenceField | None,
+    ) -> None:
+        """Set or clear which free-text preference question is pending.
+
+        `None` clears it -- used both when an edit's answer has just
+        been saved and when onboarding reaches COMPLETE, per the
+        column's docstring on the model.
+        """
+        user.pending_preference_field = field.value if field is not None else None
         await self._session.flush()
 
     async def get_preferences(self, user_id: int) -> UserPreference | None:

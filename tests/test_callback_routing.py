@@ -33,9 +33,10 @@ from telegram.ext import CallbackQueryHandler
 from app.bot.handlers import (
     FEEDBACK_CALLBACK_PATTERN,
     ONBOARDING_CALLBACK_PATTERN,
+    PREFERENCES_CALLBACK_PATTERN,
     register_handlers,
 )
-from app.bot.handlers import common, feedback, onboarding
+from app.bot.handlers import common, feedback, onboarding, preferences
 
 
 def _run(coro):
@@ -156,6 +157,33 @@ def test_the_feedback_handler_declines_onboarding_callbacks() -> None:
     assert not feedback_handler.check_update(_update("onb:remote:yes"))
 
 
+def test_a_preferences_tap_reaches_the_preferences_handler() -> None:
+    assert _receiver("pref:roles:menu") is preferences.preferences_callback
+
+
+def test_every_preferences_field_routes_to_the_preferences_handler() -> None:
+    for data in (
+        "pref:roles:menu",
+        "pref:locations:menu",
+        "pref:experience:menu",
+        "pref:experience:1-3",
+        "pref:threshold:menu",
+        "pref:threshold:0.7",
+    ):
+        assert _receiver(data) is preferences.preferences_callback
+
+
+def test_the_preferences_handler_declines_onboarding_and_feedback_callbacks() -> None:
+    """The third prefix added after Day 11 must follow the same rule as
+    the first two: declare what it accepts, decline everything else."""
+    preferences_handler = _callback_handlers()[2]
+
+    assert preferences_handler.callback is preferences.preferences_callback
+    assert not preferences_handler.check_update(_update("onb:remote:yes"))
+    assert not preferences_handler.check_update(_update("fb:interested:42"))
+    assert preferences_handler.check_update(_update("pref:threshold:0.7"))
+
+
 # --- the hole the fix opened, and its net --------------------------------
 
 
@@ -197,12 +225,12 @@ def test_empty_callback_data_matches_every_handler_regardless_of_pattern() -> No
 
 def test_the_catch_all_is_registered_last() -> None:
     """Load-bearing ordering. It matches unconditionally, so registered
-    anywhere but last it would swallow the two handlers above it and
+    anywhere but last it would swallow the handlers above it and
     reintroduce the original bug with a different callback on the end.
     """
     handlers = _callback_handlers()
 
-    assert len(handlers) == 3
+    assert len(handlers) == 4
     assert handlers[-1].callback is common.unknown_callback
     assert handlers[-1].pattern is None
 
@@ -250,7 +278,9 @@ def test_the_patterns_are_built_from_the_services_own_prefixes() -> None:
     handler that never fires. The same silent shape as the bug above."""
     from app.services.notification_message import CALLBACK_PREFIX as FB
     from app.services.onboarding import CALLBACK_PREFIX as ONB
+    from app.services.preferences import CALLBACK_PREFIX as PREF
 
     assert ONBOARDING_CALLBACK_PATTERN == rf"^{ONB}:"
     assert FEEDBACK_CALLBACK_PATTERN == rf"^{FB}:"
-    assert ONB != FB, "the two prefixes must be distinguishable"
+    assert PREFERENCES_CALLBACK_PATTERN == rf"^{PREF}:"
+    assert len({ONB, FB, PREF}) == 3, "all three prefixes must be distinguishable"

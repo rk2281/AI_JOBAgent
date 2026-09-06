@@ -206,6 +206,22 @@ country-only values treated separately.
 - **Company matching is exact, not substring** — deliberate. One
   company field holds three companies joined by `||`, and exact match
   will never catch it. Undecided.
+- **`normalize_location` can take a locality instead of a city.**
+  `app/services/locations.py` keeps only the first comma-separated
+  segment of `jobs.location`, on the assumption that Adzuna's
+  `display_name` is ordered most-specific-first (city, then state,
+  then country). Job 88's location is `"Hussainialam, Hyderabad"` —
+  Hussainialam is a locality _within_ Hyderabad, listed first — so it
+  normalizes to `"hussainialam"` instead of `"hyderabad"`. Confirmed
+  against live data 2026-09-05: `normalize_location("Hussainialam,
+Hyderabad") == "hussainialam"`. It happened not to change that job's
+  outcome (neither string matches a preference of "Delhi"), but it
+  would silently miscount for a preference of "Hyderabad" specifically.
+  **Not fixed.** "First segment is most specific" is a deliberate
+  simplification (see the module docstring — this is a spelling/suffix
+  problem, not a geography problem, on purpose), and changing it needs
+  a decision about how to detect and strip a leading locality, not a
+  patch.
 - **`abstain_experience` at 98/99 is a source-data ceiling**, not an
   extraction bug.
 - **The prediction on record**: after a full enrichment pass,

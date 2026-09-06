@@ -135,3 +135,28 @@ notification digest — one message per job.
   renamed `concurrent_claim_probe.py`.
 - **The Day 10 prompts are committed, unfolded and self-contradicting
   on purpose.** Whether to fold them is a human decision.
+- **Nothing captures `run.py`'s console output to a file.** `logs/` is
+  gitignored and empty; the bot server's stdout/stderr goes only to
+  whatever terminal launched it, and is gone the moment that terminal
+  closes or the process is killed. Confirmed the hard way on
+  2026-09-05: two `/preferences` taps got no reply and `/help` didn't
+  show a just-added command, and the cause could not be determined
+  retroactively because the process that had actually been serving
+  Telegram at the time was already gone, with no record of what it did
+  or why. The leading hypothesis (a stale pre-fix process was still
+  answering) was never provable. Not fixed here — deliberately, per
+  the same reasoning as item 7 above about what an unattended log can
+  hold — but it is why that incident closed as "unexplained" instead
+  of diagnosed.
+- **The `Microsoft-Windows-TaskScheduler/Operational` event log channel
+  was found disabled on this machine on 2026-09-05**, during the first
+  attempt to actually observe a scheduled run instead of inferring one
+  from `LastTaskResult`. This is the first tool anyone reaches for when
+  a scheduled task misbehaves, and it was off. It is unknown when or by
+  whom — Windows does not ship it disabled by default, so something on
+  this machine turned it off. Re-enabling it (`wevtutil sl
+Microsoft-Windows-TaskScheduler/Operational /e:true`) requires an
+  elevated session; it could not be done from the shell available to the
+  agent, which held no administrator token and had no interactive
+  desktop session available to answer the UAC prompt an elevation
+  attempt raised. Still disabled as of this writing.

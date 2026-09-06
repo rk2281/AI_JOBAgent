@@ -214,11 +214,25 @@ $settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 3)
 
+# No -Principal means Register-ScheduledTask defaults to LogonType
+# Interactive, which only runs the task inside an interactive logon
+# session for $env:USERNAME -- a different contract from "runs
+# unattended overnight". Verified 2026-09-05 by reading the LIVE
+# registered task (Get-ScheduledTask ... | select Principal), not the
+# script: LogonType was Interactive and the first unattended fire
+# returned 3221225786 (0xC000013A). S4U runs unattended for this user
+# without storing a password, which -Password would require.
+$principal = New-ScheduledTaskPrincipal `
+    -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -LogonType S4U `
+    -RunLevel Limited
+
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
+    -Principal $principal `
     -Description "Nightly AI job hunt workflow. See scripts/schedule_agent.ps1." `
     -Force | Out-Null
 
