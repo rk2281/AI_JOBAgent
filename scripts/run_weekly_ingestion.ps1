@@ -3,14 +3,14 @@ $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
-$log = Join-Path $root "logs\agent_$stamp.log"
+$log = Join-Path $root "logs\agent_ingestion_$stamp.log"
 
 "=== started $(Get-Date -Format o) ===" | Out-File -FilePath $log -Encoding utf8
 
 # 2>&1 merges stderr into the same stream so a traceback and the summary
 # land in one file in the order they happened. A separate stderr file
 # would interleave wrongly and hide which line caused which.
-& "$root\.venv\Scripts\python.exe" -m scripts.run_agent --skip-ingestion *>&1 |
+& "$root\.venv\Scripts\python.exe" -m scripts.run_agent --skip-enrichment *>&1 |
     Out-File -FilePath $log -Encoding utf8 -Append
 
 $code = $LASTEXITCODE
