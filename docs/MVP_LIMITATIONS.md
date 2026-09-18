@@ -129,10 +129,10 @@ notification digest — one message per job.
 - **No monitoring or alerting.** Every check is a script somebody runs.
 - **No structured log aggregation.** Logs are files on one machine.
 - **No backup or restore procedure** for the database.
-- **`scripts/concurrent_claim_dryrun.py` is not a dry run.** It fires
-  real Gemini extractions and has already left a CV in a bad state.
-  "dryrun" in a script name is a promise of no writes; it should be
-  renamed `concurrent_claim_probe.py`.
+- **No load or concurrency testing beyond one manual diagnostic.**
+  `scripts/concurrent_claim_probe.py` (renamed 2026-09-18 from
+  `concurrent_claim_dryrun.py`, which fired real Gemini extractions
+  despite its name) exists but is a one-shot script, not a test suite.
 - **The Day 10 prompts are committed, unfolded and self-contradicting
   on purpose.** Whether to fold them is a human decision.
 - **Nothing captures `run.py`'s console output to a file.** `logs/` is

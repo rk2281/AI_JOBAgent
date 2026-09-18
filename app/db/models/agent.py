@@ -137,6 +137,10 @@ class AgentRun(Base):
     ingestion_run_id: Mapped[int | None] = mapped_column(Integer)
     jobs_inserted: Mapped[int | None] = mapped_column(Integer)
 
+    cv_embedding_status: Mapped[str | None] = mapped_column(String(32))
+    cvs_embedded: Mapped[int | None] = mapped_column(Integer)
+    cv_embeddings_remaining_null: Mapped[int | None] = mapped_column(Integer)
+
     embedding_status: Mapped[str | None] = mapped_column(String(32))
     jobs_embedded: Mapped[int | None] = mapped_column(Integer)
     embeddings_remaining_null: Mapped[int | None] = mapped_column(Integer)

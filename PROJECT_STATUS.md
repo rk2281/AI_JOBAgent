@@ -544,7 +544,7 @@ neither.
 | `config_selftest.py`                | Prints scoring settings and proves the weights validator actually fires                                                                                        | none                                                                                                                                  | Neither (in-process only, no engine)                                                               |
 | `e2e_verify.py`                     | Drives one fixture candidate through every real stage; TRUNCATES the target DB first                                                                           | `--database-url` (required, must contain "test"), `--with-telegram`                                                                   | **Writes** (and truncates), always                                                                 |
 | `asymmetry_isolate.py`              | Read-only breakdown of the abstention-asymmetry effect on `notify_eligible`                                                                                    | `--run-id`                                                                                                                            | **Read-only**                                                                                      |
-| `concurrent_claim_dryrun.py`        | Fires two concurrent CV extractions to prove the claim lock excludes a second task                                                                             | `--user-id` (required)                                                                                                                | **Writes + live API** — despite the name (see BUGS #5)                                             |
+| `concurrent_claim_probe.py`         | Fires two concurrent CV extractions to prove the claim lock excludes a second task                                                                             | `--user-id` (required)                                                                                                                | **Writes + live API** (correctly named as of 2026-09-18 — see BUGS #5)                             |
 | `embedding_isolate.py`              | Six escalating Gemini embedding calls to characterize the provider (dimension, normalization, task_type, batching)                                             | `--stage`                                                                                                                             | Live API, no DB                                                                                    |
 | `enrichment_isolate.py`             | Three escalating Gemini calls for the enrichment schema/hang diagnosis; `--job-id` mode reads a real stored job                                                | `--job-id`                                                                                                                            | Live API; DB only in `--job-id` mode (read)                                                        |
 | `gemini_isolate.py`                 | Three escalating Gemini calls for the CV-extraction hang diagnosis                                                                                             | none                                                                                                                                  | Live API, no DB                                                                                    |
@@ -819,6 +819,8 @@ two of the three being updated.
 
 ### 5. `scripts/concurrent_claim_dryrun.py`'s name promises no writes; it performs a real Gemini call and mutates state — `scripts/concurrent_claim_dryrun.py:1-16`
 
+**FIXED 2026-09-18.** Renamed to `concurrent_claim_probe.py`. See §10.
+
 The filename and module docstring ("Prove the extraction claim
 actually excludes a second task") give no indication this is a
 mutating script, and the project's own convention (stated explicitly
@@ -836,6 +838,15 @@ Low severity because it's a manually-invoked diagnostic script, not
 on any automated path, but it remains a live landmine for anyone who
 runs it expecting the "dryrun" name to mean what it means everywhere
 else in this codebase.
+
+**What changed:** the file is now `scripts/concurrent_claim_probe.py`.
+Every other reference to the old name in the repo (this report,
+`send_test_notification.py`, `notification_constraints_check.py`,
+`docs/MVP_LIMITATIONS.md`, `CLAUDE.md`'s open item recommending the
+rename) was updated to match. Historical `CLAUDE.md` entries
+describing the incident under the old name were left as written —
+they were true when recorded — with a pointer added rather than the
+prose rewritten.
 
 ---
 

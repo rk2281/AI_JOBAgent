@@ -1,6 +1,6 @@
 """Prove the extraction claim actually excludes a second task.
 
-    python -m scripts.concurrent_claim_dryrun --user-id 2
+    python -m scripts.concurrent_claim_probe --user-id 2
 
 Fires two extractions at the same CV simultaneously and reports what
 each returned. Day 4 wrote extraction_status='extracting' but never

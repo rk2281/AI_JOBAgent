@@ -126,6 +126,41 @@ def test_the_summary_is_json_serialisable() -> None:
     assert json.loads(json.dumps(summary)) == summary
 
 
+def test_embedding_fields_reach_the_summary_job_and_cv_side() -> None:
+    """No existing test asserted this key mapping for either side --
+    test_a_fully_populated_state_is_json_serialisable only checks the
+    result round-trips through JSON, not that the values landed under
+    the right keys. cv_embedding is new (embed_cvs, app/workflows/graph.py);
+    covering both sides together is what catches one being wired and
+    the other forgotten.
+    """
+    summary = build_run_summary(
+        _state_with(
+            embedding=normalise_embedding_result(
+                _FakeEmbeddingResult(
+                    status=EmbeddingStatus.COMPLETE,
+                    counters=_FakeEmbeddingCounters(succeeded=97),
+                    remaining_null=2,
+                )
+            ),
+            cv_embedding=normalise_embedding_result(
+                _FakeEmbeddingResult(
+                    status=EmbeddingStatus.COMPLETE,
+                    counters=_FakeEmbeddingCounters(succeeded=3),
+                    remaining_null=0,
+                )
+            ),
+        )
+    )
+
+    assert summary["embedding_status"] == "complete"
+    assert summary["jobs_embedded"] == 97
+    assert summary["embeddings_remaining_null"] == 2
+    assert summary["cv_embedding_status"] == "complete"
+    assert summary["cvs_embedded"] == 3
+    assert summary["cv_embeddings_remaining_null"] == 0
+
+
 # --- normalisers flatten enums to strings --------------------------------
 
 

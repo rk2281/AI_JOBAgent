@@ -113,6 +113,22 @@ STATUS_SKIPPED_DRY_RUN = "skipped_dry_run"
 # dropped by the send cap below it anyway, being the lower-scoring of
 # the two. Asserted against the cap at call time rather than left as a
 # claim in a comment.
+#
+# That reasoning only holds if eligibility were monotonic with
+# final_score -- it is not. The other two gates, semantic_raw and
+# weight_covered, are independent of final_score, so a lower-ranked row
+# outside this window can pass all three gates while a higher-ranked row
+# inside it fails one of the other two. That means notify_eligible
+# (computed over every scored pair, no window -- job_scoring.py) can be
+# strictly greater than what select_notifiable() ever finds, for a
+# reason app/workflows/state.py's delivery-comment did not list among
+# the causes of that disagreement until this line was added.
+#
+# Known, accepted limitation, not fixed here: widening the window (or
+# re-querying past it when fewer than `cap` eligible rows are found) is
+# a bigger structural change than this comment should carry. Exposure
+# at ~99 jobs/user is judged low. Reconsider once jobs/user grows well
+# past current levels -- see CLAUDE.md's Day 14 entry.
 _GATE_WINDOW = 25
 
 # UserPreference.notification_threshold's own column default, and what

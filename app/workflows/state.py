@@ -377,6 +377,7 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
     read by a person watching a script print them.
     """
     ingestion = state.get("ingestion") or {}
+    cv_embedding = state.get("cv_embedding") or {}
     embedding = state.get("embedding") or {}
     enrichment = state.get("enrichment") or {}
     scoring = state.get("scoring") or {}
@@ -388,7 +389,7 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
 
     degraded = any(
         is_degraded_status(result.get("status"))
-        for result in (ingestion, embedding, enrichment, scoring, notification)
+        for result in (ingestion, cv_embedding, embedding, enrichment, scoring, notification)
     )
 
     status = select_graph_status(
@@ -423,6 +424,9 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
         "ingestion_status": ingestion.get("status"),
         "ingestion_run_id": ingestion.get("run_id"),
         "jobs_inserted": ingestion.get("inserted"),
+        "cv_embedding_status": cv_embedding.get("status"),
+        "cvs_embedded": cv_embedding.get("succeeded"),
+        "cv_embeddings_remaining_null": cv_embedding.get("remaining_null"),
         "embedding_status": embedding.get("status"),
         "jobs_embedded": embedding.get("succeeded"),
         "embeddings_remaining_null": embedding.get("remaining_null"),
@@ -456,8 +460,11 @@ def build_run_summary(state: AgentState) -> dict[str, Any]:
         # DELIVERY did, and they are reported side by side rather than
         # reconciled here, because the interesting case is when they
         # disagree: notify_eligible 2 with notifications_eligible_selected
-        # 0 means a job retired or a threshold moved between the two, and
-        # a single merged number would hide exactly that.
+        # 0 means a job retired, a threshold moved between the two, or
+        # delivery's own _GATE_WINDOW (notification_delivery.py) excluded
+        # a lower-ranked-by-score row that would otherwise have passed
+        # all three gates -- and a single merged number would hide
+        # exactly that.
         #
         # .get() with no default, like every counter around it. A run
         # whose notify branch never executed has NO opinion about how

@@ -475,6 +475,7 @@ Unconsumed column names`. It survived two parts and a commit because
   this is a defect with a victim row; a §1 entry would immunise it
   against being fixed. The rule the name breaks is worth stating
   outright: **"dryrun" in a script name is a promise of no writes.**
+  **Superseded 2026-09-18 — done. See the Day 14 entry.**
 - **CV 24 — user 2's active CV — reads `extraction_status = 'failed'`
   while its extracted version exists and is embedded.** The script
   re-extracted an already-complete CV on 2026-09-04, the call timed out,
@@ -781,6 +782,10 @@ gemini-3.6-flash`) that had already stopped an enrichment run
   calls `describe_genai_error(error)`, matching
   `gemini_enrichment.py` and `gemini_embeddings.py`. Pinned by a new
   test.
+- **`concurrent_claim_dryrun.py` renamed to `concurrent_claim_probe.py`**,
+  closing the "Open after Day 10 Part 4" item above. Every reference
+  elsewhere in the repo updated to match; nothing imported it by
+  module name.
 
 ### Open after Day 14
 
@@ -796,3 +801,15 @@ gemini-3.6-flash`) that had already stopped an enrichment run
   both have this gap. Flagged when the node was proposed, not closed
   when it was built — a deliberate scope cut at the time, still open
   now.
+- **`_GATE_WINDOW = 25` is a fourth, now-documented cause of
+  `notify_eligible` vs `notifications_eligible_selected`
+  disagreement.** Its own comment argued the truncation was safe
+  because the window and the gate's first condition both order on
+  `final_score` — but the other two gates (`semantic_raw`,
+  `weight_covered`) are independent of it, so a row outside the top 25
+  by score can still pass all three gates while a higher-ranked row
+  inside the window fails one of the other two. Not fixed: widening
+  the window is a bigger structural change than this pass covers, and
+  at ~99 jobs/user the exposure is judged low. **Reconsider once
+  jobs/user grows well past current levels** — that is the trigger
+  condition, not a calendar date. Both affected comments now say so.

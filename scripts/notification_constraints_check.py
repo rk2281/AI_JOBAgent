@@ -9,7 +9,7 @@ printing the row counts before and after as two separate numbers for a
 human to compare.
 
 That is deliberate wording, and this repository has earned it:
-`concurrent_claim_dryrun.py` promised no writes in its NAME, fired real
+`concurrent_claim_probe.py` promised no writes in its NAME, fired real
 Gemini extractions, and left a row in a state nobody authorised. So the
 guarantee here is structural, not a matter of care. Constraints are
 enforced at statement time, inside the transaction, which is precisely

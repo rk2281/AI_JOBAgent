@@ -5,7 +5,7 @@
     python -m scripts.send_test_notification --user-id 2 --send --top 1
 
 THIS SENDS A REAL MESSAGE TO A REAL PERSON. It is not a dry run, and it
-is not called one -- `concurrent_claim_dryrun.py` is this repository's
+is not called one -- `concurrent_claim_probe.py` is this repository's
 example of a script whose name promised no writes and fired real Gemini
 extractions instead, and the rule that broke is worth stating: "dryrun"
 in a script name is a promise. This name makes no promise to keep.
