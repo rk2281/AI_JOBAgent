@@ -28,6 +28,7 @@ from google.genai import types
 from pydantic import ValidationError
 
 from app.core.config import settings
+from app.integrations.gemini_embeddings import describe_genai_error
 from app.schemas.cv_profile import CVProfile
 
 # Retry 5xx and 408, but NOT 429. This is a diagnostic decision before
@@ -213,9 +214,15 @@ class GeminiClient:
                 },
             )
         except Exception as error:  # noqa: BLE001 - provider errors are not typed here
-            raise GeminiExtractionError(
-                f"Gemini request failed: {error}"
-            ) from error
+            # describe_genai_error(), not str(error): this SDK's exception
+            # string form is the provider's own formatted body, not a short
+            # reason. f"...{error}" put a 429's full message -- including
+            # the free-tier quota metric and limit -- into extraction_error
+            # verbatim. On this path the request is a candidate's CV text,
+            # so the same interpolation on a different error shape is a
+            # leak, not a diagnostic. Same fix gemini_enrichment.py and
+            # gemini_embeddings.py already carry.
+            raise GeminiExtractionError(describe_genai_error(error)) from error
 
         # A server-side failure does not raise. It comes back as a
         # well-formed Interaction with status='failed', the reason in

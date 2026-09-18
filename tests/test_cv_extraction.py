@@ -15,10 +15,12 @@ extraction.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.db.repositories.skill import normalize_skill_name, normalize_skill_names
-from app.integrations.gemini import GeminiClient
+from app.integrations.gemini import GeminiClient, GeminiExtractionError
 from app.schemas.cv_profile import CVProfile, EducationEntry, ExperienceEntry
 from app.services.cv_extraction import _is_empty_extraction
 from app.services.cv_text import UnsupportedCVFormat, extract_raw_text
@@ -251,3 +253,55 @@ def test_timeout_seconds_converted_to_milliseconds_on_http_options() -> None:
 
     http_options = client._client._api_client._http_options
     assert http_options.timeout == 30_000
+
+
+# -- GeminiClient error redaction --------------------------------------
+
+
+class FakeAPIError(Exception):
+    """Same shape as the one in tests/test_gemini_embeddings.py: a
+    provider exception whose str() carries something that must never
+    reach a stored message."""
+
+    def __init__(self, code: int, leaky: str) -> None:
+        super().__init__(leaky)
+        self.code = code
+
+
+def test_extract_profile_error_message_is_redacted(monkeypatch) -> None:
+    """CV 33's extraction_error once held Google's full 429 body --
+    quota metric, limit, and retry hint -- verbatim, because this path
+    used f"Gemini request failed: {error}" instead of
+    describe_genai_error(). On this path the request is a candidate's
+    CV text, so the same interpolation on a different error shape is a
+    leak, not a diagnostic.
+
+    Mirrors test_describe_reports_class_and_status_only in
+    tests/test_gemini_embeddings.py, but driven through the real
+    extract_profile() call path rather than the pure function alone --
+    this is the integration point that actually leaked, not
+    describe_genai_error() itself, which was already correct.
+
+    No real network call: interactions.create is replaced before it
+    would be invoked, same as the timeout test above constructing a
+    client with no request made.
+    """
+    client = GeminiClient(api_key="test-key")
+    leaky_text = "secret-cv-text-should-not-appear"
+    error = FakeAPIError(429, leaky_text)
+
+    async def fake_create(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(client._client.aio.interactions, "create", fake_create)
+
+    async def scenario() -> None:
+        await client.extract_profile("some cv text")
+
+    with pytest.raises(GeminiExtractionError) as excinfo:
+        asyncio.run(scenario())
+
+    message = str(excinfo.value)
+    assert "FakeAPIError" in message
+    assert "429" in message
+    assert leaky_text not in message

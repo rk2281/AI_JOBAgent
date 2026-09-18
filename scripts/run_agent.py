@@ -52,6 +52,7 @@ if sys.platform == "win32":
 
 from datetime import datetime, timezone  # noqa: E402
 
+from app.core.logging import setup_logging  # noqa: E402
 from app.db.repositories.agent import AgentRunRepository  # noqa: E402
 from app.db.session import dispose_engine, init_engine, session_scope  # noqa: E402
 from app.workflows.graph import build_graph  # noqa: E402
@@ -209,6 +210,16 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
+
+    # Without this, the scheduled path (run_nightly.ps1 -> this __main__
+    # block) never configures a logging handler at all, so Python's
+    # "handler of last resort" only surfaces WARNING and above -- every
+    # per-job INFO line in run_enrichment / run_job_embedding /
+    # run_cv_embedding ("job N: X.Xs (ok)"/"(failed)") is silently
+    # dropped, and every nightly log has been missing them. app/main.py
+    # calls this in the same position, before init_engine(), for the
+    # same reason: configure logging before anything that might log.
+    setup_logging()
 
     if init_engine() is None:
         print("DATABASE_URL is not configured.")
