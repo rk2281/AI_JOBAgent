@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.integrations.adzuna import AdzunaClient
+from app.services.cv_embedding import run_cv_embedding
 from app.services.job_embedding import run_job_embedding
 from app.services.job_enrichment import run_enrichment
 from app.services.job_ingestion import run_ingestion
@@ -73,6 +74,47 @@ def _skip(node: str, reason: str) -> dict[str, Any]:
     return {"stages_skipped": [f"{node}: {reason}"]}
 
 
+async def embed_cvs(state: dict[str, Any]) -> dict[str, Any]:
+    """Embed active CV versions still missing a vector -- before anything
+    asks who is scorable.
+
+    Runs first, ahead of resolve_targets, because resolve_targets's own
+    gate reads users_with_embedded_cv, and nothing else in this graph
+    ever embeds a CV. Before this node existed, a user who uploaded a CV
+    between one run and the next stayed invisible to every run after it
+    -- not skipped with a reason, never counted at all -- until somebody
+    ran scripts/embed_cvs.py by hand.
+
+    This is a deliberate exception to "ask before spending": every other
+    stage waits for resolve_targets to say somebody is worth running for
+    before it spends anything. CV embedding cannot wait for that answer,
+    because it is what produces the answer. It costs nothing on a night
+    with no pending CVs -- the candidate query returns empty and no API
+    call is made -- but it now runs even on a request that will end at
+    no_scorable_users for every other reason.
+
+    run_cv_embedding has no dry_run parameter, so under --dry-run this
+    stage is skipped rather than spending embedding quota, same as
+    embed_jobs.
+    """
+    if state.get("dry_run"):
+        return _skip("embed_cvs", "dry_run")
+    if state.get("skip_embedding"):
+        return _skip("embed_cvs", "skip_embedding")
+
+    result = await run_cv_embedding()
+    normalised = normalise_embedding_result(result)
+
+    update: dict[str, Any] = {
+        "cv_embedding": normalised,
+        "stages_attempted": ["embed_cvs"],
+        "stages_persisted": ["embed_cvs"],
+    }
+    if embedding_computed(normalised):
+        update["stages_computed"] = ["embed_cvs"]
+    return update
+
+
 async def resolve_targets(state: dict[str, Any]) -> dict[str, Any]:
     """Is there anybody worth running for?
 
@@ -80,6 +122,10 @@ async def resolve_targets(state: dict[str, Any]) -> dict[str, Any]:
     first spend an Adzuna pass and a day of Gemini quota finding that
     out. run_scoring answers the same question, but only after doing
     all of the work.
+
+    No longer the first node in the graph -- embed_cvs runs before it,
+    because this function's own answer depends on CVs already being
+    embedded. See embed_cvs's docstring.
 
     Calls a service, not a repository, and receives back nothing but
     ints -- so no ORM instance and no session crosses into graph state.

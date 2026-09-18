@@ -118,6 +118,7 @@ class AgentState(TypedDict, total=False):
     started_at: str
 
     # --- per-stage results: flat dicts of primitives, status a str ---
+    cv_embedding: dict[str, Any] | None
     targets: dict[str, Any] | None
     ingestion: dict[str, Any] | None
     embedding: dict[str, Any] | None
@@ -167,6 +168,7 @@ def initial_state(
         ingestion_max_pages=ingestion_max_pages,
         enrichment_limit=enrichment_limit,
         started_at=started_at,
+        cv_embedding=None,
         targets=None,
         ingestion=None,
         embedding=None,

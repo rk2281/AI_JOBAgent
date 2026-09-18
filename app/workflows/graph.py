@@ -9,6 +9,8 @@ category as sqlalchemy in repositories and pydantic in schemas.
 
     START
       |
+  embed_cvs          (self-skips, with a reason)
+      |
   resolve_targets --- nobody scorable ---------------+
       |                                              |
   discover_jobs      (self-skips, with a reason)     |
@@ -30,6 +32,14 @@ category as sqlalchemy in repositories and pydantic in schemas.
    finalise <----------------------------------------+
       |
      END
+
+embed_cvs runs before resolve_targets, not after it, and that is the one
+place in this graph where "ask before spending" is not followed: every
+other stage waits for resolve_targets to say somebody is worth running
+for. CV embedding cannot wait for that answer, because resolve_targets's
+answer depends on it -- a CV uploaded since the last run is invisible to
+users_with_embedded_cv until something embeds it, and nothing else in
+this graph does. See app/workflows/nodes.py:embed_cvs.
 
 Only three edges are conditional. The skip decisions are inside the
 nodes, so a skipped stage still has somebody to record WHY it was
@@ -56,6 +66,7 @@ from app.core.config import assert_tracing_disabled
 from app.workflows.nodes import (
     decide_notification,
     discover_jobs,
+    embed_cvs,
     embed_jobs,
     enrich_jobs,
     finalise,
@@ -72,11 +83,15 @@ from app.workflows.state import AgentState
 
 # The node set, declared rather than inferred, so a test can assert the
 # graph has exactly these and a node cannot be dropped without a
-# failure. embed_jobs is the one that matters: it is absent from the
-# plan's Day 9 row, and without it an ingest-then-score run scores none
-# of the new jobs while its funnel balances perfectly.
+# failure. embed_jobs is one node that matters this way: it is absent
+# from the plan's Day 9 row, and without it an ingest-then-score run
+# scores none of the new jobs while its funnel balances perfectly.
+# embed_cvs is the other: without it, resolve_targets's own gate --
+# users_with_embedded_cv >= 1 -- can never see a CV uploaded since the
+# last run, and a new user stays invisible with nothing recording why.
 NODE_NAMES = frozenset(
     {
+        "embed_cvs",
         "resolve_targets",
         "discover_jobs",
         "embed_jobs",
@@ -130,6 +145,7 @@ def build_graph():
 
     graph = StateGraph(AgentState)
 
+    graph.add_node("embed_cvs", embed_cvs)
     graph.add_node("resolve_targets", resolve_targets)
     graph.add_node("discover_jobs", discover_jobs)
     graph.add_node("embed_jobs", embed_jobs)
@@ -139,7 +155,13 @@ def build_graph():
     graph.add_node("notify", notify)
     graph.add_node("finalise", finalise)
 
-    graph.add_edge(START, "resolve_targets")
+    graph.add_edge(START, "embed_cvs")
+
+    # embed_cvs, not resolve_targets, is what START points at now.
+    # resolve_targets's own gate reads users_with_embedded_cv, and a CV
+    # uploaded since the last run cannot be counted by that gate unless
+    # something embeds it first. Nothing else in this graph does.
+    graph.add_edge("embed_cvs", "resolve_targets")
     graph.add_conditional_edges("resolve_targets", route_after_targets, TARGETS_PATH_MAP)
 
     # Embedding before enrichment. Neither feeds the other --

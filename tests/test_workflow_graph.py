@@ -35,6 +35,8 @@ from pathlib import Path
 import pytest
 
 from app.workflows import nodes
+from app.db.models.embedding import EmbeddingStatus
+from app.services.job_embedding import EmbeddingResult
 from app.workflows.graph import (
     NODE_NAMES,
     NOTIFICATION_PATH_MAP,
@@ -98,6 +100,15 @@ def _drawn():
     return build_graph().get_graph()
 
 
+async def _fake_nothing_to_embed(*args, **kwargs) -> EmbeddingResult:
+    """A CV-embedding pass with nothing to do -- no candidates, no API
+    call. embed_cvs now runs before resolve_targets can veto anything,
+    so any test that stubs resolve_scoring_targets directly (never
+    reaching a real database) needs this or it makes a real one.
+    """
+    return EmbeddingResult(status=EmbeddingStatus.NOTHING_TO_DO)
+
+
 def _all_paths(edges, start: str, goal: str) -> list[list[str]]:
     """Every simple path from start to goal, as node-name lists."""
     outgoing: dict[str, list[str]] = {}
@@ -157,6 +168,27 @@ def test_embedding_runs_before_enrichment() -> None:
     newly ingested jobs scorable at all."""
     for path in _all_paths(_drawn().edges, "discover_jobs", "score_and_rank"):
         assert path.index("embed_jobs") < path.index("enrich_jobs")
+
+
+def test_embed_cvs_is_a_node_at_all() -> None:
+    """Weak on its own -- the path test below is the real one -- but it
+    localises the failure when someone deletes the node outright."""
+    assert "embed_cvs" in _drawn().nodes
+
+
+def test_embed_cvs_runs_before_resolve_targets() -> None:
+    """The anti-disappearance test, CV side.
+
+    resolve_targets gates the whole run on users_with_embedded_cv >= 1,
+    and nothing else in this graph embeds a CV. If embed_cvs stopped
+    running before resolve_targets, a user who just uploaded a CV would
+    read as permanently unscorable -- not skipped with a reason, never
+    counted at all -- rather than merely embedded one run later.
+    """
+    paths = _all_paths(_drawn().edges, "__start__", "resolve_targets")
+    assert paths, "no path from start to resolve_targets at all"
+    for path in paths:
+        assert "embed_cvs" in path, f"path reaches resolve_targets without embedding CVs: {path}"
 
 
 def test_every_node_can_reach_finalise() -> None:
@@ -292,7 +324,15 @@ def test_the_quiet_branch_is_reachable(monkeypatch) -> None:
 
 def test_a_run_with_nobody_scorable_never_reaches_scoring(monkeypatch) -> None:
     """It must stop before spending an Adzuna pass and a day of Gemini
-    quota discovering there was nobody to score for."""
+    quota discovering there was nobody to score for.
+
+    embed_cvs is the one exception: it runs before resolve_targets can
+    say anybody is scorable, because resolve_targets's own gate reads
+    users_with_embedded_cv, and this stage is what would move that
+    number. So this test stubs it with a real (empty) result rather than
+    asserting it never runs -- everything AFTER targeting is still
+    proven unreachable.
+    """
 
     async def fake_targets(*, user_id=None):
         return {
@@ -307,6 +347,7 @@ def test_a_run_with_nobody_scorable_never_reaches_scoring(monkeypatch) -> None:
         raise AssertionError("must not run when nobody is scorable")
 
     monkeypatch.setattr(nodes, "resolve_scoring_targets", fake_targets)
+    monkeypatch.setattr(nodes, "run_cv_embedding", _fake_nothing_to_embed)
     monkeypatch.setattr(nodes, "run_scoring", never)
     monkeypatch.setattr(nodes, "run_ingestion", never)
     monkeypatch.setattr(nodes, "run_enrichment", never)
@@ -316,13 +357,14 @@ def test_a_run_with_nobody_scorable_never_reaches_scoring(monkeypatch) -> None:
         build_graph().ainvoke(initial_state(started_at="2026-09-03T00:00:00+00:00"))
     )
 
+    assert "embed_cvs" in final["stages_attempted"]
     assert final["terminal_reason"] == "no_scorable_users"
     assert final["notify_branch"] is None
     assert final["scoring"] is None
 
 
 def test_a_dry_run_skips_ingestion_and_embedding_end_to_end(monkeypatch) -> None:
-    """The whole graph, and the two skips still carry their reasons."""
+    """The whole graph, and all three skips still carry their reasons."""
     _stub_everything(monkeypatch, notify_eligible=0)
 
     def never(*args, **kwargs):
@@ -331,6 +373,7 @@ def test_a_dry_run_skips_ingestion_and_embedding_end_to_end(monkeypatch) -> None
     monkeypatch.setattr(nodes, "run_ingestion", never)
     monkeypatch.setattr(nodes, "AdzunaClient", never)
     monkeypatch.setattr(nodes, "run_job_embedding", never)
+    monkeypatch.setattr(nodes, "run_cv_embedding", never)
 
     async def fake_enrichment(*, limit=None, dry_run=False):
         assert dry_run is True
@@ -344,6 +387,7 @@ def test_a_dry_run_skips_ingestion_and_embedding_end_to_end(monkeypatch) -> None
         )
     )
 
+    assert "embed_cvs: dry_run" in final["stages_skipped"]
     assert "discover_jobs: dry_run" in final["stages_skipped"]
     assert "embed_jobs: dry_run" in final["stages_skipped"]
     assert "enrich_jobs" in final["stages_attempted"]
@@ -760,6 +804,7 @@ def test_a_graph_run_that_never_scored_reports_no_skip_causes_at_all(
         }
 
     monkeypatch.setattr(nodes, "resolve_scoring_targets", fake_targets)
+    monkeypatch.setattr(nodes, "run_cv_embedding", _fake_nothing_to_embed)
 
     final = _run(
         build_graph().ainvoke(initial_state(started_at="2026-09-03T00:00:00+00:00"))
