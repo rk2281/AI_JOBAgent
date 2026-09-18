@@ -46,9 +46,40 @@ class Settings(BaseSettings):
     # extraction schema returned valid CVProfile JSON on 3.6-flash in
     # 9.3s. gemini-2.5-flash, tried earlier, is retired outright — the
     # API's own 404 for it names gemini-3.6-flash as the replacement.
-    # scripts/gemini_isolate.py is the diagnostic that settles this
-    # class of problem; run it against any new model before trusting it.
+    # scripts/enrichment_isolate.py is the diagnostic that settles this
+    # class of problem for THIS field; run it against any new model
+    # before trusting it. (Until 2026-09-18 this field was also CV
+    # extraction's model, and scripts/gemini_isolate.py settled it for
+    # both — see cv_extraction_model below for why that changed.)
     gemini_model: str = "gemini-3.6-flash"
+
+    # Separate from gemini_model above on purpose, as of 2026-09-18.
+    # Both used to read that one field, which meant both drew on the
+    # same free-tier quota bucket without anyone deciding that should
+    # be true. Confirmed directly, not inferred: CV 33's extraction
+    # attempt failed on 2026-09-05 07:46:32 UTC with the identical 429
+    # ("Quota exceeded for metric: generativelanguage.googleapis.com/
+    # generate_content_free_tier_requests, limit: 20, model:
+    # gemini-3.6-flash") that had already stopped an enrichment run
+    # eleven minutes earlier, at 07:35:48 UTC, after only 5 jobs.
+    #
+    # gemini-3.1-flash-lite: confirmed live 2026-09-18 via a one-off
+    # probe shaped like scripts/gemini_isolate.py's call "A" -- a tiny
+    # no-schema prompt returned status='completed', output_text='pong'
+    # in 6.0s, the same shape gemini-3.6-flash passed in the
+    # verification recorded above. Not battle-tested against the real
+    # extraction schema the way gemini-3.6-flash was (that was call B
+    # and C in the same script) -- scripts/gemini_isolate.py now reads
+    # this field instead of gemini_model, so running it is what would
+    # settle that before leaning on this in anger.
+    #
+    # Google's quota is enforced per (metric, model), not per metric
+    # alone -- the raw error above carries model as a field inside one
+    # shared metric name, not a distinct metric string. So this field
+    # and gemini_model getting the same metric name back on a future
+    # 429 would not mean they share a bucket; the model field inside
+    # it is what to check.
+    cv_extraction_model: str = "gemini-3.1-flash-lite"
 
     # --- Job ingestion (Day 6) ----------------------------------------------
     # Adzuna authenticates with a PAIR of values, not a single token,

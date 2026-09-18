@@ -165,7 +165,7 @@ class GeminiClient:
     ) -> None:
         # Public: app.services.cv_extraction records which model
         # produced a given CVVersion, so it needs to read this back.
-        self.model = model or settings.gemini_model
+        self.model = model or settings.cv_extraction_model
         self.timeout_seconds = timeout_seconds
         self._client = genai.Client(
             api_key=api_key or settings.gemini_api_key,

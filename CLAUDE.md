@@ -725,3 +725,74 @@ the offending archive it exits 1 and names every entry.
   scheduled task or a day-of-week branch in `run_nightly.ps1` — a
   scheduling change, not a code change, since the flag already exists
   and is already tested.
+
+---
+
+## 11. Day 14 — CV embedding automated, and a quota bucket nobody decided to share
+
+### Closed by Day 14
+
+- **CV embedding was never wired into the automated graph; now is.**
+  `embed_cvs` is a new node in `app/workflows/graph.py`, added ahead
+  of `resolve_targets` rather than after `discover_jobs` where
+  `embed_jobs` sits — `resolve_targets`'s own gate reads
+  `users_with_embedded_cv`, so a CV uploaded since the last run could
+  never be counted by it unless something embeds that CV first, and
+  nothing else in the graph did. Before this, a user who onboarded and
+  uploaded a CV stayed permanently unscorable until a human ran
+  `python -m scripts.embed_cvs` by hand — not skipped with a reason,
+  never counted at all. This is the one place in the graph where "ask
+  before spending" is deliberately not followed: `embed_cvs` runs
+  unconditionally before `resolve_targets` can veto anything, because
+  it is what produces the answer `resolve_targets` needs.
+- **CV extraction and job enrichment were unknowingly sharing one
+  free-tier Gemini quota bucket.** Both `GeminiClient` and
+  `GeminiEnrichmentClient` read `settings.gemini_model` —
+  `gemini-3.6-flash`, the same model, the same account-level
+  free-tier ceiling. Not inferred: CV 33's extraction attempt failed
+  at 2026-09-05 07:46:32 UTC with the identical 429
+  (`generate_content_free_tier_requests, limit: 20, model:
+gemini-3.6-flash`) that had already stopped an enrichment run
+  eleven minutes earlier, after only 5 jobs. Fixed by giving
+  extraction its own field, `cv_extraction_model`, defaulting to
+  `gemini-3.1-flash-lite` — confirmed live reachable (a tiny
+  no-schema prompt returned `status='completed'` in 6.0s) before
+  being trusted, the same discipline `gemini_model`'s own comment
+  already demanded of any replacement. `gemini_model` is now
+  enrichment's alone.
+- **`run_agent.py` never called `setup_logging()`.** Only
+  `app/main.py` did. Every nightly `agent_*.log` therefore ran with
+  no configured logging handler at all — Python's default "handler of
+  last resort" surfaces WARNING and above only, so every per-job
+  `logger.info(...)` line in enrichment and embedding
+  (`"job N: X.Xs (ok)"` etc.) was silently dropped in every scheduled
+  run to date. Confirmed by grepping 10 real logs: zero per-job lines
+  in any of them. Fixed: `setup_logging()` is now the first thing
+  `run_agent.py`'s `__main__` block does, in the same position
+  `app/main.py`'s lifespan already calls it.
+- **CV-extraction error messages were leaking the raw provider
+  body.** `gemini.py`'s exception handler used to build
+  `GeminiExtractionError` from `f"Gemini request failed: {error}"` —
+  a direct interpolation the other two Gemini clients had already
+  stopped doing, for exactly this reason. This is how CV 33's
+  `extraction_error` column ended up holding Google's complete 429
+  body verbatim, quota metric and all — the same leak shape §3
+  already warns about, from a path nobody had checked. Fixed: it now
+  calls `describe_genai_error(error)`, matching
+  `gemini_enrichment.py` and `gemini_embeddings.py`. Pinned by a new
+  test.
+
+### Open after Day 14
+
+- **`build_run_summary()` still has no visibility into `embed_cvs`'s
+  own counters.** The node writes `stages_attempted` /
+  `stages_skipped` / `stages_computed` / `stages_persisted` entries
+  like every other node, so a run where it worked or was skipped is
+  visible in those generic lists — but there is no
+  `cv_embedding_status` / `cvs_embedded` /
+  `cv_embeddings_remaining_null` line the way jobs get
+  `embedding_status` / `jobs_embedded` / `embeddings_remaining_null`.
+  `run_agent.py`'s printed summary and the `agent_runs` row it writes
+  both have this gap. Flagged when the node was proposed, not closed
+  when it was built — a deliberate scope cut at the time, still open
+  now.

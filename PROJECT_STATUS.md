@@ -391,11 +391,11 @@ schedules a background task, `_extract_and_notify`
 (`app/services/cv_extraction.py:98`) →
 `GeminiClient.extract_profile()` (`app/integrations/gemini.py:185`)
 → writes `profiles` + `cv_versions`. That CV version only becomes
-scorable once a **separate** pass, `run_cv_embedding()`
-(`app/services/cv_embedding.py:51`), embeds it — this is not wired
-into the onboarding flow or the nightly graph; it must be run by
-hand (`python -m scripts.embed_cvs`) or scheduled separately (see
-BUGS/HEALTH — it is not part of `scripts/run_agent.py`'s node set).
+scorable once a separate pass, `run_cv_embedding()`
+(`app/services/cv_embedding.py:51`), embeds it — **as of 2026-09-18
+this runs automatically**, as the `embed_cvs` node
+(`app/workflows/graph.py`), first in the graph, ahead of
+`resolve_targets`. It is no longer a manual-only step; see §10.
 
 **Feedback loop:** notification buttons → `app/bot/handlers/feedback.py`
 → `FeedbackService.handle_callback()` → `FeedbackRepository.record()`
@@ -584,7 +584,7 @@ APP_NAME  APP_ENV  DEBUG  LOG_LEVEL
 TELEGRAM_BOT_TOKEN  TELEGRAM_MODE
 DATABASE_URL
 CV_STORAGE_DIR  MAX_CV_SIZE_MB
-GEMINI_API_KEY  GEMINI_MODEL
+GEMINI_API_KEY  GEMINI_MODEL  CV_EXTRACTION_MODEL
 ADZUNA_APP_ID  ADZUNA_APP_KEY  ADZUNA_COUNTRY
 ADZUNA_RESULTS_PER_PAGE  ADZUNA_MAX_PAGES_PER_RUN  ADZUNA_MAX_DAYS_OLD
 ADZUNA_QUERY_KEYWORDS  ADZUNA_QUERY_LOCATIONS  ADZUNA_SORT_BY
@@ -764,6 +764,8 @@ implicit consequence of an efficiency comment that doesn't hold.
 
 ### 2. `.env.example`'s example `GEMINI_MODEL` value is the one this project's own code found unusable — `.env.example:70`, `app/core/config.py:39-51`
 
+**FIXED 2026-09-18 — two ways, not one.** See §10.
+
 `.env.example:70` reads `GEMINI_MODEL=gemini-3.7-flash`. But
 `app/core/config.py:39-50` documents, from direct measurement, that
 `gemini-3.7-flash` "does not serve for this project's API key ... the
@@ -776,6 +778,17 @@ written (a very ordinary way to read an example file) would silently
 reintroduce the exact multi-hour hang `docs/` records Day 4/5 losing
 time to, because a hung request looks identical to a slow one until
 the timeout finally fires.
+
+**What changed:** `.env.example:70` now reads
+`GEMINI_MODEL=gemini-3.6-flash`, matching the model that actually
+works. Independently, and more durably: CV extraction no longer
+reads `GEMINI_MODEL` / `settings.gemini_model` at all —
+`app/integrations/gemini.py:168` now reads a new
+`settings.cv_extraction_model` field instead (default
+`gemini-3.1-flash-lite`), added for an unrelated reason (§10). So
+even if this example value drifted stale again, it could no longer
+reintroduce the extraction hang described above — that field isn't
+in extraction's read path anymore.
 
 ### 3. `.env.example` documents `TELEGRAM_MODE=webhook` as a valid choice; the code hard-rejects it — `.env.example:37-39`, `app/core/config.py:526-559`
 
@@ -830,3 +843,83 @@ _Everything in `CLAUDE.md` §1 ("Do not 'fix' these") and its Day
 12/13 additions was cross-checked against the current code while
 writing this report and is treated as settled, deliberate behavior —
 none of it is repeated here as a bug._
+
+---
+
+## 10. CHANGES SINCE THIS REPORT WAS WRITTEN (2026-09-18)
+
+Four changes landed after the analysis above was written. Recorded
+here rather than folded silently into the sections above, so the rest
+of this report stays an accurate account of what was true when it was
+written.
+
+### 1. CV embedding wired into the automated graph
+
+`embed_cvs` is now a node in `app/workflows/graph.py`, added ahead of
+`resolve_targets` — not after `discover_jobs`, where `embed_jobs`
+sits. `resolve_targets`'s own gate reads `users_with_embedded_cv`, so
+CV embedding has to run before that gate can see a CV uploaded since
+the last run; nothing else in the graph embeds one. `NODE_NAMES` now
+has 9 entries, not 8. Closes the gap §4's PIPELINE trace described: a
+CV previously became scorable only via a manual run of
+`scripts/embed_cvs.py` — see §4's updated wording above.
+
+One deliberate trade-off, not a defect: `embed_cvs` runs
+unconditionally before `resolve_targets` can veto anything, which is
+the one place in the graph where "ask before spending" is not
+followed. Every other stage waits for `resolve_targets` to confirm
+somebody is scorable before it spends anything; CV embedding can't
+wait for that answer, because it's what produces it.
+`app/workflows/nodes.py`'s `embed_cvs` docstring records the reasoning.
+
+### 2. CV extraction and job enrichment were sharing one Gemini quota bucket, unknowingly
+
+Both `GeminiClient` (`app/integrations/gemini.py`, CV extraction) and
+`GeminiEnrichmentClient` (`app/integrations/gemini_enrichment.py`, job
+enrichment) read `settings.gemini_model` — the same field, same
+model, `gemini-3.6-flash`. Confirmed as a live incident, not a
+theoretical risk: CV 33's extraction attempt failed at 2026-09-05
+07:46:32 UTC with `Quota exceeded for metric:
+generativelanguage.googleapis.com/generate_content_free_tier_requests,
+limit: 20, model: gemini-3.6-flash` — the identical 429 that had
+already stopped an enrichment run eleven minutes earlier, at 07:35:48
+UTC, after only 5 jobs (`agent_runs` id 5).
+
+Fixed by giving extraction its own field: `Settings.cv_extraction_model`
+(`config.py`, default `gemini-3.1-flash-lite` — confirmed live
+reachable via a one-off probe, `status='completed'`, 6.0s, before
+being trusted). `app/integrations/gemini.py:168` now reads it instead
+of `gemini_model`; `scripts/gemini_isolate.py` (the CV-extraction
+model diagnostic) was repointed to match. `gemini_enrichment.py` is
+untouched — enrichment still reads `gemini_model`. See §9 BUGS #2.
+
+### 3. `setup_logging()` was never called under the scheduled path
+
+`scripts/run_agent.py` — what `run_nightly.ps1` actually invokes —
+never called `app.core.logging.setup_logging()`; only `app/main.py`
+(the Telegram/API service) did. Result: every `agent_*.log` produced
+by the scheduler had no configured logging handler at all, so
+Python's default "handler of last resort" surfaced WARNING and above
+only — every per-job `logger.info(...)` line in `run_enrichment` /
+`run_job_embedding` / `run_cv_embedding` (`"job N: X.Xs (ok)"` etc.)
+was silently dropped in every nightly log to date. Confirmed
+empirically, not assumed: grepped 10 real nightly logs, zero per-job
+lines in any of them. Fixed by calling `setup_logging()` first thing
+inside `run_agent.py`'s `if __name__ == "__main__":` block, mirroring
+where `app/main.py` already calls it.
+
+### 4. CV-extraction error messages were leaking the raw provider body
+
+`app/integrations/gemini.py:217` used to build `GeminiExtractionError`
+via `f"Gemini request failed: {error}"` — a direct interpolation of
+the SDK exception's string form, which is the provider's full
+formatted error body, not a short reason (the same fact
+`gemini_embeddings.py`'s `describe_genai_error()` docstring already
+documented for the other two Gemini clients). This is exactly how CV
+33's `extraction_error` column ended up holding Google's complete 429
+response verbatim — quota metric, limit, and retry hint — the same
+leak shape this project has hit nine times before, per `CLAUDE.md` §3.
+Fixed: `gemini.py:217` now calls `describe_genai_error(error)`,
+matching `gemini_enrichment.py` and `gemini_embeddings.py`. Pinned by
+a new test,
+`tests/test_cv_extraction.py::test_extract_profile_error_message_is_redacted`.

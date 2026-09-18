@@ -68,7 +68,7 @@ async def attempt(client, label: str, description: str, **kwargs) -> bool:
 
     try:
         interaction = await client.aio.interactions.create(
-            model=settings.gemini_model,
+            model=settings.cv_extraction_model,
             **kwargs,
         )
     except Exception as error:  # noqa: BLE001 - this script exists to see any error
@@ -97,7 +97,7 @@ async def attempt(client, label: str, description: str, **kwargs) -> bool:
 
 
 async def main() -> int:
-    print(f"model: {settings.gemini_model}")
+    print(f"model: {settings.cv_extraction_model}")
     print(f"timeout: {TIMEOUT_MS / 1000:.0f}s per call")
     print()
 

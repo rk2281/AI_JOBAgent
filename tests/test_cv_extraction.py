@@ -19,6 +19,7 @@ import asyncio
 
 import pytest
 
+from app.core.config import settings
 from app.db.repositories.skill import normalize_skill_name, normalize_skill_names
 from app.integrations.gemini import GeminiClient, GeminiExtractionError
 from app.schemas.cv_profile import CVProfile, EducationEntry, ExperienceEntry
@@ -233,6 +234,21 @@ def test_extraction_not_empty_with_whitespace_summary_only() -> None:
 
 def test_extraction_not_empty_with_real_summary() -> None:
     assert _is_empty_extraction(CVProfile(summary="ML engineer")) is False
+
+
+# -- GeminiClient model ---------------------------------------------------
+
+
+def test_client_reads_its_model_from_cv_extraction_model_setting() -> None:
+    """CV extraction and job enrichment used to share settings.gemini_model,
+    and therefore the same free-tier quota bucket -- confirmed directly
+    when CV 33's extraction failed with the same 429 that had already
+    stopped an enrichment run 11 minutes earlier on 2026-09-05.
+    cv_extraction_model gives extraction its own field so a future
+    change to one does not silently retarget the other.
+    """
+    client = GeminiClient(api_key="test-key")
+    assert client.model == settings.cv_extraction_model
 
 
 # -- GeminiClient timeout ------------------------------------------------
