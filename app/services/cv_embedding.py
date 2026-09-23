@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
 from app.core.config import settings
+from app.db.models.cv import CVVersion
 from app.db.models.embedding import EmbeddingStatus
 from app.db.repositories.cv import CVRepository
 from app.db.repositories.job import EmbeddingRunRepository
@@ -46,6 +47,39 @@ from app.services.job_embedding import EmbeddingResult, _classify, _Counters
 logger = logging.getLogger(__name__)
 
 SCOPE_CV_VERSIONS = "cv_versions"
+
+
+@dataclass(frozen=True)
+class _PreparedDocument:
+    """The embeddable text for one CV version, or None if it's empty.
+
+    Shared between run_cv_embedding's batch loop and embed_cv_version's
+    single-version path so the two never build the document
+    differently. Does not call the API -- callers decide when: the
+    batch loop rate-limits between calls, embed_cv_version makes
+    exactly one.
+    """
+
+    version_id: int
+    text: str | None
+    digest: str | None
+    truncated: bool
+
+
+def _embed_one_version(version: CVVersion) -> _PreparedDocument:
+    raw = build_cv_document(version.extracted_profile)
+    text, was_truncated = fit_to_budget(raw)
+    if not text.strip():
+        return _PreparedDocument(version.id, None, None, was_truncated)
+    return _PreparedDocument(version.id, text, document_hash(text), was_truncated)
+
+
+@dataclass(frozen=True)
+class CVEmbeddingOutcome:
+    """What happened when embed_cv_version ran, for a caller that wants to react."""
+
+    embedded: bool
+    error: str | None = None
 
 
 async def run_cv_embedding(
@@ -79,14 +113,13 @@ async def run_cv_embedding(
         )
 
         for version in versions:
-            raw = build_cv_document(version.extracted_profile)
-            text, was_truncated = fit_to_budget(raw)
-            if was_truncated:
+            prepared = _embed_one_version(version)
+            if prepared.truncated:
                 truncated += 1
 
             counters.candidates_considered += 1
 
-            if not text.strip():
+            if prepared.text is None:
                 # An active version whose stored profile renders to
                 # nothing. Not a provider failure -- our data. It
                 # should be rare, because a version that failed the
@@ -95,7 +128,7 @@ async def run_cv_embedding(
                 counters.skipped_empty_text += 1
                 continue
 
-            pending.append((version.id, text, document_hash(text)))
+            pending.append((prepared.version_id, prepared.text, prepared.digest))
 
     status: EmbeddingStatus | None = None
     error_message: str | None = None
@@ -172,3 +205,54 @@ async def run_cv_embedding(
         truncated=truncated,
         error_message=error_message,
     )
+
+
+async def embed_cv_version(
+    version_id: int,
+    client: GeminiEmbeddingClient | None = None,
+) -> CVEmbeddingOutcome:
+    """Embed exactly one CV version, right after onboarding extracts it.
+
+    Deliberately does not touch embedding_attempts on failure -- see
+    CVRepository.record_embedding_error_without_attempt. A failure here
+    must leave the row exactly as eligible for the next nightly
+    embed_cvs sweep as a CV nobody has ever tried to embed, not opt it
+    out after exactly one try. Do not unify this with run_cv_embedding's
+    own failure handling.
+
+    Owns its own transactions, like run_cv_embedding. Does not open an
+    EmbeddingRunRepository row -- this is one call outside any
+    scheduled run, not a run of its own.
+    """
+    client = client or GeminiEmbeddingClient()
+
+    async with session_scope() as session:
+        version = await CVRepository(session).version_by_id(version_id)
+
+    if version is None:
+        return CVEmbeddingOutcome(embedded=False, error="version not found")
+    if version.embedding is not None:
+        return CVEmbeddingOutcome(embedded=True)
+
+    prepared = _embed_one_version(version)
+    if prepared.text is None:
+        return CVEmbeddingOutcome(embedded=False, error="empty document")
+
+    try:
+        vector = await client.embed_query(prepared.text)
+    except (EmbeddingQuotaError, EmbeddingError) as exc:
+        async with session_scope() as session:
+            await CVRepository(session).record_embedding_error_without_attempt(
+                version_id, str(exc)
+            )
+        return CVEmbeddingOutcome(embedded=False, error=str(exc))
+
+    async with session_scope() as session:
+        await CVRepository(session).set_version_embedding(
+            version_id,
+            vector,
+            client.model,
+            prepared.digest,
+            datetime.now(timezone.utc),
+        )
+    return CVEmbeddingOutcome(embedded=True)

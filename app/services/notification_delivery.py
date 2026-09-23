@@ -85,8 +85,8 @@ from app.db.repositories.notification import NotificationRepository
 from app.db.repositories.scoring import RecommendationRepository
 from app.db.repositories.user import UserRepository
 from app.db.session import session_scope
-from app.integrations.telegram import TelegramNotifier
-from app.services.job_scoring import is_notify_eligible, select_target_user_ids
+from app.integrations.telegram import TelegramNotifier, describe_telegram_error
+from app.services.job_scoring import is_notify_eligible, run_scoring, select_target_user_ids
 from app.services.notification_message import format_job_notification
 from app.services.replies import BotReply
 
@@ -638,6 +638,8 @@ async def run_notification_delivery(
     *,
     user_id: int | None = None,
     dry_run: bool = False,
+    trigger_source: str = TRIGGER_SOURCE_SCHEDULED,
+    notifier: TelegramNotifier | None = None,
 ) -> dict:
     """Entry point. Gate, then deliver, then report.
 
@@ -649,10 +651,156 @@ async def run_notification_delivery(
     This is the ONLY function in the module that both applies the gate
     and talks to Telegram, and it does neither itself: it calls the two
     halves in order. There is no argument that makes it skip the first.
+
+    trigger_source defaults to the nightly value so every existing
+    caller (run_agent.py, the graph's notify node) is unaffected. The
+    onboarding path is the first caller to pass a different one.
+
+    notifier defaults to None, same as deliver_notifications' own
+    parameter -- added so a caller of THIS function (not just of
+    deliver_notifications directly) can inject a stub for a test. Every
+    existing caller omits it and gets today's behaviour: a real
+    TelegramNotifier built inside deliver_notifications.
     """
     candidates = await select_notifiable(user_id=user_id)
     return await deliver_notifications(
         candidates,
-        trigger_source=TRIGGER_SOURCE_SCHEDULED,
+        trigger_source=trigger_source,
         dry_run=dry_run,
+        notifier=notifier,
     )
+
+
+# --- instant, onboarding- or preferences-triggered scoring + delivery ----
+#
+# Both onboarding (a new CV) and /preferences (a changed target_roles,
+# preferred_locations, or notification_threshold) want the same thing:
+# score (maybe) and notify ONE user right away instead of waiting for
+# the next scheduled run_agent.py pass. One implementation, both
+# callers -- CLAUDE.md's Day 6 rule about two users of one rule sharing
+# one implementation, invoked again here for the Day 16 review.
+#
+# SILENT AND BEST-EFFORT, BY DESIGN, HERE RATHER THAN AT EACH CALL SITE
+#
+# Never raises. A failure here costs a user an instant message, not a
+# stuck state, because the nightly pass redoes this regardless -- the
+# same promise onboarding's own instant path already made before this
+# function existed. Putting the try/except HERE instead of in every
+# caller means that promise holds for every caller automatically,
+# including a future one, rather than depending on each handler
+# remembering to wrap its call.
+#
+# COALESCING, NOT DROPPING
+#
+# A user who edits target_roles and then, seconds later, preferred_
+# locations must not have the second edit silently lost until the next
+# 03:00 run. If a call for this user_id arrives while one is already
+# running, it does not start a second overlapping run (see IN-FLIGHT
+# below) and it does not return without effect either: it sets a
+# "run again" flag, and the in-flight run loops once more after it
+# finishes, reading whatever preferences are current AT THAT POINT.
+# A rerun always forces rescore=True regardless of what the coalesced
+# caller asked for: by the time a second trigger arrives there is no
+# cheap way to tell whether the field that changed was scoring-relevant,
+# and always getting it right is worth one occasionally-redundant
+# scoring pass on what is already a rare path.
+#
+# IN-FLIGHT, NOT A QUEUE, AND IN-PROCESS ONLY
+#
+# Per-user_id, a plain module-level set -- safe under asyncio's
+# single-threaded cooperative scheduling because there is no `await`
+# between the membership check and the add, so two coroutines can never
+# both see it empty. This serialises onboarding-triggered and
+# preferences-triggered runs against EACH OTHER for the same user, not
+# just preferences edits against themselves: an onboarding CV upload
+# and a preferences edit landing within the same event loop tick for
+# the same user now share this exact guard.
+#
+# It does NOT serialise against the nightly run_agent.py pass, which is
+# a separate OS process and cannot see this in-process set. That race
+# is real and traced (see notifications.open_attempt: any number of
+# PENDING rows are allowed per pair, so two processes can both pass the
+# gate and both call TelegramNotifier.send before either commits
+# mark_sent) and is deliberately NOT closed here -- see CLAUDE.md's Day
+# 16 entry for the precedent (CVRepository.claim_for_extraction's
+# atomic conditional UPDATE) and the condition for revisiting it.
+_in_flight_users: set[int] = set()
+_rerun_needed_users: set[int] = set()
+
+
+async def score_and_notify_user(
+    user_id: int,
+    *,
+    trigger_source: str,
+    rescore: bool = True,
+    notifier: TelegramNotifier | None = None,
+) -> dict:
+    """Score (maybe) and notify one user right away. Never raises.
+
+    rescore controls whether run_scoring() runs first. A threshold-only
+    preference edit does not change any stored score -- the gate reads
+    notification_threshold fresh at delivery time regardless (see
+    evaluate_candidates) -- so rescore=False skips a full-catalog
+    scoring pass that could not change anything. A rerun coalesced from
+    a second trigger always forces rescore=True; see the module note
+    above for why.
+
+    notifier is forwarded to run_notification_delivery unchanged, so a
+    test can inject a stub through the whole chain without a bot token
+    or a network call, and production leaves it None.
+    """
+    if user_id in _in_flight_users:
+        _rerun_needed_users.add(user_id)
+        logger.info(
+            "score_and_notify_user already running for user_id=%s; "
+            "coalescing into a rerun after it finishes",
+            user_id,
+        )
+        return {"status": "coalesced", "trigger_source": trigger_source}
+
+    _in_flight_users.add(user_id)
+    try:
+        result: dict = {"status": "not_run", "trigger_source": trigger_source}
+        while True:
+            try:
+                if rescore:
+                    await run_scoring(user_id=user_id)
+                result = await run_notification_delivery(
+                    user_id=user_id,
+                    trigger_source=trigger_source,
+                    notifier=notifier,
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort; the nightly pass is the real path
+                # NEVER logger.exception() here. That call attaches
+                # exc_info -- the full traceback, which prints str(exc)
+                # verbatim -- and python-telegram-bot's InvalidToken
+                # message quotes the rejected token outright ("The
+                # token `...` was rejected by the server"). A revoked
+                # or rotated real token reaching this except block would
+                # otherwise be written into the bot's own logs, the same
+                # leak shape CLAUDE.md section 3 already names: the
+                # credential travels in something that doesn't look like
+                # a secret operation. describe_telegram_error() is safe
+                # for ANY exception, not just Telegram ones -- its last
+                # tier is "class name only" -- so it is called
+                # unconditionally rather than guessing whether this
+                # failure came from Telegram.
+                logger.error(
+                    "score_and_notify_user failed for user_id=%s "
+                    "trigger_source=%s exception_type=%s telegram_detail=%s",
+                    user_id,
+                    trigger_source,
+                    type(exc).__name__,
+                    describe_telegram_error(exc),
+                )
+                result = {"status": "error", "trigger_source": trigger_source}
+
+            if user_id in _rerun_needed_users:
+                _rerun_needed_users.discard(user_id)
+                rescore = True
+                continue
+            break
+    finally:
+        _in_flight_users.discard(user_id)
+
+    return result

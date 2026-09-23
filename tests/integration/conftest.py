@@ -44,7 +44,19 @@ from typing import Any, TypeVar
 import pytest
 from sqlalchemy import text
 
+if sys.platform == "win32":
+    # psycopg's async driver cannot use the ProactorEventLoop Windows
+    # defaults to. Every script in this repo sets this before importing
+    # anything from app.db (CLAUDE.md section 5); this fixture module
+    # never did, because TEST_DATABASE_URL had apparently never been set
+    # on Windows before -- every prior run skipped before asyncio.run()
+    # ever executed. Must be set before the first event loop is created,
+    # so it goes here, at import time, before app.db.session is imported
+    # below.
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import app.db.models  # noqa: F401  -- registers every table on Base.metadata
+import app.services.notification_delivery as notification_delivery
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import dispose_engine, init_engine, session_scope
@@ -113,6 +125,44 @@ def _migrated_database() -> None:
     # deliberately pinned it at a dead port; this overrides that for
     # this directory only.
     settings.database_url = TEST_DATABASE_URL
+
+
+@pytest.fixture(autouse=True)
+def _no_real_telegram_notifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No integration test may ever open a socket to Telegram.
+
+    deliver_notifications() (app/services/notification_delivery.py)
+    builds a real TelegramNotifier whenever a caller doesn't pass one --
+    that is the documented production default, not a bug. Two Day 16
+    tests called _try_instant_recommendation, which has no way to pass a
+    notifier through at all, and that default silently built a real
+    TelegramNotifier against this conftest's fake token and made a real
+    outbound call to api.telegram.org (InvalidToken, sent=0). Autouse so
+    a future test cannot reintroduce the same mistake by omission.
+
+    Replaces the class itself with one whose constructor raises, so a
+    test relying on the production default fails immediately and
+    loudly instead of quietly reaching the network. A test that needs
+    to exercise real delivery overrides this again, in its own body,
+    with its own fake -- see
+    tests/integration/test_onboarding_completion_ordering.py.
+    """
+
+    class _RealTelegramNotifierIsForbiddenInTests:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError(
+                "A real TelegramNotifier was about to be constructed "
+                "during a test. Pass your own fake notifier, or patch "
+                "notification_delivery.TelegramNotifier explicitly, "
+                "instead of relying on deliver_notifications()'s "
+                "production default."
+            )
+
+    monkeypatch.setattr(
+        notification_delivery,
+        "TelegramNotifier",
+        _RealTelegramNotifierIsForbiddenInTests,
+    )
 
 
 @pytest.fixture()

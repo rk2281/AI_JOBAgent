@@ -93,6 +93,7 @@ class ExtractionResult:
 
     status: ExtractionStatus
     error: str | None = None
+    version_id: int | None = None
 
 
 async def extract_cv(
@@ -259,7 +260,7 @@ async def extract_cv(
         user_id,
         len(profile_data.skills),
     )
-    return ExtractionResult(status=ExtractionStatus.COMPLETE)
+    return ExtractionResult(status=ExtractionStatus.COMPLETE, version_id=version.id)
 
 
 async def _finish_failed(cv_id: int, message: str) -> ExtractionResult:

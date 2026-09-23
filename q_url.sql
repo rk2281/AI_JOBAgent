@@ -1,0 +1,1 @@
+SELECT id, source, url FROM jobs WHERE id IN (403, 593, 694) ORDER BY id

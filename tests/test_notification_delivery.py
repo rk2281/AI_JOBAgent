@@ -28,6 +28,7 @@ import pytest
 
 from app.db.models.recommendation import (
     TRIGGER_SOURCE_MANUAL_TEST,
+    TRIGGER_SOURCE_ONBOARDING,
     TRIGGER_SOURCE_SCHEDULED,
 )
 from app.integrations.telegram import SendResult
@@ -426,6 +427,68 @@ def test_the_default_trigger_source_is_scheduled(monkeypatch) -> None:
     result, _ = _deliver([_candidate()], notifier, monkeypatch)
 
     assert result["trigger_source"] == "scheduled"
+
+
+def test_run_notification_delivery_passes_trigger_source_through(monkeypatch) -> None:
+    """run_notification_delivery is select_notifiable then
+    deliver_notifications; this is the test that would have caught a
+    version that still hard-coded TRIGGER_SOURCE_SCHEDULED regardless
+    of what the caller asked for -- which is exactly what it did before
+    the onboarding path needed to say 'onboarding' instead.
+
+    select_notifiable and deliver_notifications are both faked here, so
+    this is purely a wiring test: does the value passed IN come out the
+    other side unchanged. Each half is already covered on its own --
+    deliver_notifications above, select_notifiable's real gate logic in
+    its own tests -- so this does not re-test either.
+    """
+    candidate = _candidate()
+    captured: dict = {}
+
+    async def fake_select_notifiable(*, user_id=None):
+        captured["select_user_id"] = user_id
+        return [candidate]
+
+    async def fake_deliver_notifications(candidates, *, trigger_source, dry_run=False, notifier=None):
+        captured["candidates"] = candidates
+        captured["trigger_source"] = trigger_source
+        return {"status": "ok", "trigger_source": trigger_source}
+
+    monkeypatch.setattr(delivery, "select_notifiable", fake_select_notifiable)
+    monkeypatch.setattr(delivery, "deliver_notifications", fake_deliver_notifications)
+
+    result = _run(
+        delivery.run_notification_delivery(
+            user_id=7, trigger_source=TRIGGER_SOURCE_ONBOARDING
+        )
+    )
+
+    assert captured["select_user_id"] == 7
+    assert captured["candidates"] == [candidate]
+    assert captured["trigger_source"] == TRIGGER_SOURCE_ONBOARDING
+    assert result["trigger_source"] == TRIGGER_SOURCE_ONBOARDING
+
+
+def test_run_notification_delivery_still_defaults_to_scheduled(monkeypatch) -> None:
+    """Every existing caller (run_agent.py, the graph's notify node) calls
+    this with no trigger_source at all. The new parameter must not
+    change what they get."""
+    candidate = _candidate()
+    captured: dict = {}
+
+    async def fake_select_notifiable(*, user_id=None):
+        return [candidate]
+
+    async def fake_deliver_notifications(candidates, *, trigger_source, dry_run=False, notifier=None):
+        captured["trigger_source"] = trigger_source
+        return {"status": "ok"}
+
+    monkeypatch.setattr(delivery, "select_notifiable", fake_select_notifiable)
+    monkeypatch.setattr(delivery, "deliver_notifications", fake_deliver_notifications)
+
+    _run(delivery.run_notification_delivery())
+
+    assert captured["trigger_source"] == TRIGGER_SOURCE_SCHEDULED
 
 
 # --- the funnel ----------------------------------------------------------

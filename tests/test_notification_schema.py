@@ -16,6 +16,8 @@ from app.db.models import Base
 from app.db.models.recommendation import (
     NOTIFICATION_TRIGGER_SOURCES,
     TRIGGER_SOURCE_MANUAL_TEST,
+    TRIGGER_SOURCE_ONBOARDING,
+    TRIGGER_SOURCE_PREFERENCES,
     TRIGGER_SOURCE_SCHEDULED,
     Notification,
     NotificationStatus,
@@ -118,9 +120,20 @@ def test_trigger_source_is_a_varchar_and_not_a_fourth_enum_type() -> None:
     assert not hasattr(column.type, "enum_class")
 
 
-def test_the_two_trigger_sources_are_distinct_and_enumerated() -> None:
-    assert TRIGGER_SOURCE_SCHEDULED != TRIGGER_SOURCE_MANUAL_TEST
-    assert NOTIFICATION_TRIGGER_SOURCES == {"scheduled", "manual_test"}
+def test_the_four_trigger_sources_are_distinct_and_enumerated() -> None:
+    sources = [
+        TRIGGER_SOURCE_SCHEDULED,
+        TRIGGER_SOURCE_MANUAL_TEST,
+        TRIGGER_SOURCE_ONBOARDING,
+        TRIGGER_SOURCE_PREFERENCES,
+    ]
+    assert len(set(sources)) == len(sources), "every trigger source must be distinct"
+    assert NOTIFICATION_TRIGGER_SOURCES == {
+        "scheduled",
+        "manual_test",
+        "onboarding",
+        "preferences",
+    }
 
 
 # --- feedback ------------------------------------------------------------

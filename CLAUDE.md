@@ -171,18 +171,18 @@ the end, and returns a dict of counters. `run_ingestion`,
 
 ## 6. Where things stand
 
-|                             |                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------- |
-| Alembic head                | `c8e2a15f4b93` — 10 migrations; `alembic check` clean as of Day 12              |
-| Tests                       | 729 passing with a database, 706 + 23 skipped without (664 before Day 12)       |
-| Workflow                    | `app/workflows/` — 8 nodes, 3 conditional edges; runs persisted to `agent_runs` |
-| Jobs                        | 99, all embedded, 1 excluded (job 2)                                            |
-| CV versions                 | 3 active, all embedded                                                          |
-| Enriched jobs               | 5, of which 2 produced skills                                                   |
-| Jobs with experience bounds | 0                                                                               |
-| Active scoring signals      | **3 of 5**                                                                      |
-| Notifications sent          | 1, all `trigger_source = manual_test`; **0 from the gate**                      |
-| Feedback rows               | 0                                                                               |
+|                             |                                                                                                                                                                                                                                                                                                                                                                                     |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Alembic head                | `d30da11e80fa` — 12 migrations; `alembic check` clean as of Day 16 (verified with `alembic heads`)                                                                                                                                                                                                                                                                                  |
+| Tests                       | 786 collected; **745 passed + 41 skipped without a database** (directly measured, Day 16); **with a database, last directly measured at 785 passed, 0 failed** — that figure predates this Day's one new test (`tests/test_instant_recommendation_embed_logging.py`) and was not rerun as a combined suite afterward, only the 41-test integration subset was (41 passed, 0 failed) |
+| Workflow                    | `app/workflows/` — 8 nodes, 3 conditional edges; runs persisted to `agent_runs`                                                                                                                                                                                                                                                                                                     |
+| Jobs                        | 695 total (689 real + 6 `synthetic_test`, verified live Day 16), all embedded, 1 excluded (job 2)                                                                                                                                                                                                                                                                                   |
+| CV versions                 | 3 active, all embedded                                                                                                                                                                                                                                                                                                                                                              |
+| Enriched jobs               | 5, of which 2 produced skills                                                                                                                                                                                                                                                                                                                                                       |
+| Jobs with experience bounds | 0                                                                                                                                                                                                                                                                                                                                                                                   |
+| Active scoring signals      | **3 of 5**                                                                                                                                                                                                                                                                                                                                                                          |
+| Notifications sent          | includes real `trigger_source = 'preferences'` and `'onboarding'` deliveries as of Day 16, in addition to `manual_test` — **the scheduled nightly gate itself has still sent 0**                                                                                                                                                                                                    |
+| Feedback rows               | 0                                                                                                                                                                                                                                                                                                                                                                                   |
 
 Weights (`Suggested Weight` column of the plan spreadsheet's
 "Matching & Scoring" tab, and matching the code exactly): skill 30%,
@@ -786,6 +786,27 @@ gemini-3.6-flash`) that had already stopped an enrichment run
   closing the "Open after Day 10 Part 4" item above. Every reference
   elsewhere in the repo updated to match; nothing imported it by
   module name.
+- **`build_run_summary()`'s CV-embedding visibility gap (flagged when
+  `embed_cvs` was proposed, above) is closed, later the same day.**
+  Three new keys — `cv_embedding_status`, `cvs_embedded`,
+  `cv_embeddings_remaining_null` — now flow from `state.py`'s
+  `build_run_summary()` through to `run_agent.py`'s printed summary,
+  mirroring the job-side `embedding_status` / `jobs_embedded` /
+  `embeddings_remaining_null` fields exactly. This needed more than a
+  `state.py` edit: `AgentRunRepository.finish()` copies the summary
+  dict onto `AgentRun` columns by key and silently drops anything with
+  no matching column, and `tests/test_agent_runs.py`'s three parity
+  tests (`test_every_summary_key_has_a_column`,
+  `test_columns_beyond_the_summary_are_acknowledged_not_forbidden`,
+  `test_the_two_sets_are_the_same_size_apart_from_the_primary_key`)
+  would have failed had the three keys been added to the dict alone.
+  Fixed with a model change (`AgentRun` gains the three nullable
+  columns) and migration `d30da11e80fa`, applied — and `alembic
+upgrade head` run — before the `state.py` / `run_agent.py` changes,
+  not after. New test
+  `test_embedding_fields_reach_the_summary_job_and_cv_side` asserts
+  both the job-side and CV-side mappings explicitly; no prior test
+  asserted either one.
 
 ### Open after Day 14
 
@@ -801,6 +822,8 @@ gemini-3.6-flash`) that had already stopped an enrichment run
   both have this gap. Flagged when the node was proposed, not closed
   when it was built — a deliberate scope cut at the time, still open
   now.
+  **Closed 2026-09-18, later the same day — done. See the new bullet
+  above under "Closed by Day 14."**
 - **`_GATE_WINDOW = 25` is a fourth, now-documented cause of
   `notify_eligible` vs `notifications_eligible_selected`
   disagreement.** Its own comment argued the truncation was safe
@@ -813,3 +836,282 @@ gemini-3.6-flash`) that had already stopped an enrichment run
   at ~99 jobs/user the exposure is judged low. **Reconsider once
   jobs/user grows well past current levels** — that is the trigger
   condition, not a calendar date. Both affected comments now say so.
+- **Proposed, not designed in code: score and notify a new user
+  immediately after onboarding**, instead of making them wait for the
+  next scheduled `run_agent.py` pass. Job enrichment already runs
+  continuously via the nightly scheduler and jobs stay `is_active`
+  between runs, so a newly onboarded user's own CV is the only
+  missing input — it just needs to be embedded (already automated by
+  `embed_cvs`, above) and scored against the pool that already
+  exists. **Open design question, not resolved:** what happens when
+  the onboarding-time CV-embedding call fails — a retry path, and how
+  the user is told rather than left silently stuck with no
+  recommendations and no error — is not yet designed.
+  **Closed by Day 15 — done, and the design question answered: no
+  retry ceiling, no error shown to the user. See below.**
+
+### Verified live, 2026-09-18 — scoring, gating and delivery confirmed end to end on real data
+
+Two synthetic test jobs — 592 (user 14) and 593 (user 13) — were built
+directly from each user's own real profile, preferences and CV
+embedding (title, location, work mode, experience bracket and skills
+all engineered to score 1.0 on every signal; the embedding copied from
+the user's active `cv_versions` row rather than produced by a live
+Gemini call, so no quota was spent). Both scored `final_score =
+1.000`, cleared all three `is_notify_eligible()` gates, and were
+delivered — a real Telegram message, confirmed visually on both
+users' own devices. This is the first time the full path (scoring →
+gate → delivery) has been confirmed working end to end on live data,
+not only on a fixture built to clear the gates, which is what the Day
+12 record's "the notify branch has executed" note was describing.
+Both jobs are confirmed `is_active = false, is_excluded = false`
+(queried 2026-09-18: `592 | False | False`, `593 | False | False`),
+each with a one-line note appended to its `description` recording it
+was an end-to-end test — `list_scorable_jobs()`
+(`app/db/repositories/job.py:580-587`) requires `is_active = true`
+first, so neither row can be selected by scoring again regardless of
+its embedding or skills. `embedding_model` / `skills_extraction_model`
+on both rows read `synthetic:copied-from-cv-version-<id>` /
+`synthetic:copied-from-profile-<id>`, not a fabricated real model
+name, so neither can later be mistaken for a genuine Gemini result.
+
+---
+
+## 12. Day 15 — instant onboarding notification, and a credential leak
+
+### Closed by Day 15
+
+- **The Day 14 "score and notify a new user immediately after
+  onboarding" proposal is built.** After CV extraction reaches
+  `ExtractionStatus.COMPLETE`, `app/bot/handlers/onboarding.py`'s
+  `_extract_and_notify` now calls
+  `_try_instant_recommendation(user_id, version_id)`
+  (`onboarding.py:177`), which runs `embed_cv_version()` ->
+  `run_scoring()` -> `run_notification_delivery()` in sequence — real
+  production calls, nothing stubbed for this path. Delivery is tagged
+  `trigger_source="onboarding"`, a fourth value alongside `scheduled`
+  and `manual_test` on `NOTIFICATION_TRIGGER_SOURCES`
+  (`app/db/models/recommendation.py:69-72`), for the same reason the
+  other two are kept apart: so a human asking "did the nightly gate
+  ever actually fire for this user" is not misled by a row this path
+  put there instead. `run_notification_delivery()` gained a
+  `trigger_source` parameter, default `TRIGGER_SOURCE_SCHEDULED`
+  (`notification_delivery.py:641`), so every existing caller is
+  unaffected.
+- **The onboarding-time embed does not get a retry ceiling, and that
+  is evidence-backed, not an oversight.** A new `embedding_max_attempts`
+  mirroring `enrichment_max_attempts` (`config.py:492`) was designed
+  and then NOT built: a live check first showed lifetime `cv_versions`
+  embedding history is `n=3` attempts, `3` successes, **zero failures,
+  ever** — no case of any kind, deterministic or transient, has
+  actually occurred. A ceiling would pre-empt a failure mode nobody
+  has observed, on a population too small to have tested the existing
+  binary filter (`embedding_attempts == 0`) against anything. Left
+  exactly as it was. Revisit only once a real CV-embedding failure is
+  observed — that is the trigger condition, not a calendar date.
+- **A failure at onboarding time must not silently opt a CV out of the
+  nightly `embed_cvs` backstop, and now it can't.**
+  `CVRepository.record_embedding_error_without_attempt()`
+  (`app/db/repositories/cv.py:306`) writes `embedding_error` for
+  diagnosis but leaves `embedding_attempts` untouched. Calling the
+  existing `mark_version_embedding_failed()` instead — which the
+  nightly batch path still uses, unchanged — would take
+  `embedding_attempts` `0 -> 1`, and
+  `list_active_versions_needing_embedding()`'s default filter
+  (`attempts == 0`) would then exclude that row from every future
+  nightly sweep after exactly one onboarding-time failure: worse than
+  never having tried. `embed_cv_version()`
+  (`app/services/cv_embedding.py:210`) is the only caller of the new
+  method. The user is told nothing on failure either way — deliberate:
+  nothing here is load-bearing, and the nightly pass redoes it.
+- **Verified end to end on live infrastructure, not a fixture, on two
+  independent users.** User 14, a fresh unembedded `cv_versions` row
+  (id 19, a non-destructive copy of the user's real active version
+  17), one synthetic job (id 594) built from the user's own real
+  profile/preferences to clear every `is_notify_eligible()` gate —
+  same pattern as jobs 592/593 above.
+  `_try_instant_recommendation(14, 19)` called exactly as it exists in
+  production code, no stubs on any of the three stages. Repeated
+  immediately afterward for user 13: a fresh unembedded `cv_versions`
+  row (id 20, copy of the user's real active version 18), one
+  synthetic job (id 595), `_try_instant_recommendation(13, 20)`. Both
+  runs, confirmed via an independent fresh-connection query after
+  each: `cv_versions.embedding` populated, a `recommendations` row
+  (`final_score = 1.0`), a `notifications` row
+  (`trigger_source = 'onboarding'`, `status = 'SENT'`). The real
+  `run_notification_delivery()` return value — captured by a
+  transparent spy that calls the unmodified function and only
+  additionally records what it returned, since
+  `_try_instant_recommendation` itself discards it — reported
+  `sent: 1` both times: two real Telegram messages, one per user, each
+  delivered to that user's own real chat. Cleanup ran in a `finally`
+  for each: job 594 / 595 set `is_active=false`,
+  `profiles.active_cv_version_id` reverted to 17 / 18 respectively.
+- **Incident thirteen.** A Neon Postgres host, username and plaintext
+  password leaked into this session's own tool output — not from
+  printing `.env` (never touched) but from a Python traceback that
+  printed a failing `psycopg` connection call's local variables,
+  triggered by `tests/integration/conftest.py` never setting
+  `WindowsSelectorEventLoopPolicy` on Windows before this session
+  (every script in the repo already does; this fixture never had to,
+  because `TEST_DATABASE_URL` had apparently never been set before).
+  Rotated on the Neon dashboard immediately. Every other session
+  transcript and every temp task-output file were searched for the
+  leaked string afterward and came back clean; this session's own
+  live transcript file had it 4 times and was deliberately left
+  as-is rather than hand-edited mid-session — editing a running
+  session's own JSONL risked corrupting resume/rewind for a benefit
+  that mostly evaporates once the credential is inert. The
+  `conftest.py` event-loop gap is fixed, the same guard every script
+  already carries.
+
+### Open after Day 15
+
+- **`_try_instant_recommendation` has no automated test of its own.**
+  Its three stages are each covered individually (`embed_cv_version`'s
+  integration tests, `run_notification_delivery`'s `trigger_source`
+  unit tests, `run_scoring`'s existing coverage), and Day 15's manual
+  run verified the full chain once, live — but that was a one-off
+  scratchpad script, not a committed test, and it does not run in CI.
+- **Incident thirteen fits the pattern §3 already names, and no code
+  change closes the pattern itself.** Every leak so far, this one
+  included, came from something other than printing `.env` directly.
+  "Assume the next one will also not look like a secret operation"
+  (§3) is not something a fix retires.
+
+---
+
+## 13. Day 16 — preferences-triggered notification, and nothing real to send yet
+
+### Closed by Day 16
+
+- **Preferences edits now trigger an instant run**, `trigger_source =
+'preferences'`. Editing target roles or locations schedules a
+  rescore; editing the alert threshold schedules a deliver-only pass
+  (no scoring signal reads `notification_threshold` — the gate reads
+  it fresh at delivery time); editing the experience bracket triggers
+  nothing, because no scoring signal reads either experience field
+  either (open question, not a bug — see below).
+- **`score_and_notify_user`** (`app/services/notification_delivery.py`)
+  is the one shared implementation behind both the onboarding instant
+  path and the new preferences-triggered one, with an in-process
+  per-user coalescing guard: a second trigger arriving mid-run is
+  folded into exactly one rerun rather than starting a second,
+  overlapping run.
+- **A real onboarding completion-ordering defect is fixed.** A user
+  could reach `OnboardingState.COMPLETE` before their own CV finished
+  embedding. It survived Day 15 because that day's live verification
+  called `_try_instant_recommendation` directly for users whose
+  preferences were already filled in, so the real ordering was never
+  exercised.
+- **`/update_cv` already reached the instant path; now pinned by a
+  test**, so a future refactor that breaks that route is caught rather
+  than silently regressing.
+- **Integration tests ran on a real Neon test database on Windows**
+  (41 passed, 0 failed, rerun once after the logging change below with
+  the same result).
+- **A credential-leak near-miss was caught by tests, not by luck.**
+  `logger.exception` in `score_and_notify_user`'s except block would
+  have written a rejected Telegram bot token straight into the bot's
+  own log — `python-telegram-bot`'s `InvalidToken` embeds the token
+  verbatim in its message. Fixed there (only `type(exc).__name__` and
+  identifying ids are logged, never `exc_info` or `str(exc)`), and the
+  same hardening applied to `_try_instant_recommendation`'s CV-embed
+  step, which is exactly incident thirteen's shape (§12): a database
+  connection failure whose message can carry a host, a username and a
+  plaintext password. `logs/`: 18 files, 0 contain "was rejected by
+  the server" (checked as two separate reads, per §0 — a search that
+  finds nothing is not the same as a search that had nothing to
+  search).
+- **The integration test harness now blocks any real
+  `TelegramNotifier` construction**, so a test that accidentally
+  reaches that far fails loudly instead of risking a real send.
+- **Live-verified end to end on 2026-09-23, against the real
+  production database and a real Telegram chat — not a fixture.** Job
+  695, a clone of job 593, built to score 1.0 on every signal for user 13. Tapping the `/preferences` alert-threshold button from 0.6 to
+  0.7 produced exactly one new `notifications` row (id 24,
+  `status = 'SENT'`, `trigger_source = 'preferences'`, sent 07:10:08
+  UTC), no other user touched, and `scoring_runs.id`'s max unchanged
+  at 36 (deliver-only, as designed) — a real Telegram message arrived.
+  Tapping back to 0.6 afterward produced nothing at all: no new
+  `notifications` row, no message, no new `scoring_runs` row.
+  `select_notifiable()`'s `evaluation.already_sent` check
+  (`app/services/notification_delivery.py:379`) makes a second send
+  structurally unreachable once one `SENT` row exists for a pair, not
+  merely unlikely in practice. Both outcomes matched a prediction
+  written down before either phone step, exactly. Job 695 deactivated
+  and user 13's preferences confirmed restored to their exact pre-test
+  row afterward.
+- **Process note.** During this same live verification, a "confirmed"
+  report was sent before the phone action it described had actually
+  happened, which made the first round of reads come back empty and
+  looked briefly like a real delivery failure — a repeat of the
+  documented, unresolved shape in §1's row about the two `/preferences`
+  taps that got no reply. It wasn't that shape this time: process,
+  not code. Rule for future live-verification stages: the human
+  completes the phone step and waits first, then sends confirmation
+  — never the reverse.
+
+### Do not "fix" these either — additions to section 1
+
+| Observation                                                                                                              | Looks like                                   | Actually                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scripts/score_jobs.py --explain JOB_ID` looks like a read-only inspection of a stored row                               | harmless, safe to run any time               | `--explain` is skipped entirely under `--dry-run` (own code: "nothing was written, so ... would only show stale data ... Skipped"), so every real use of `--explain` first runs a full, non-dry scoring pass and writes a new `scoring_runs` row. There is no way to inspect a stored explanation without also writing a new run — read the stored `recommendations` row directly instead when a live `scoring_runs.id` must stay fixed (Day 16 Stage 3.4) |
+| `scripts/send_test_notification.py --send` delivers a message for a job its own gate report marked `blocked`             | the tool ignoring its own gate, a bug        | deliberate, and documented in its own module docstring: it selects the top-ranked unsent candidate by rank, "NOT gated," specifically so it tests delivery independently of the gate. Its rows are always `trigger_source = 'manual_test'` for exactly this reason — a `manual_test` row is proof the send path works, never proof `is_notify_eligible()` passed                                                                                           |
+| `notifications` rows with `trigger_source = 'preferences'` appear at arbitrary times of day, not on the nightly schedule | a scheduler bug, or a run outside its window | expected. Preferences edits fire `score_and_notify_user` live, from the Telegram handler, the moment a button is tapped — there is no schedule to be outside of for this trigger source                                                                                                                                                                                                                                                                    |
+
+### Open after Day 16
+
+- **Cross-process duplicate send is still unguarded against the
+  nightly `run_agent.py`.** The partial unique index on
+  `(user_id, job_id) WHERE status = 'SENT'` fixes the bookkeeping (at
+  most one `SENT` row ever lands) but not a second real message if the
+  interactive bot and a nightly run both attempt the same pair inside
+  the same race window. Precedent for the fix:
+  `CVRepository.claim_for_extraction`'s atomic conditional UPDATE.
+  Revisit if a duplicate is ever actually observed, or before adding a
+  second always-on process.
+- **The experience preference is stored and never read by scoring.**
+  Neither `min_experience_years` nor `max_experience_years` is read by
+  any signal in `app.services.scoring_signals` or
+  `app.services.job_scoring`, so editing it through `/preferences`
+  triggers no rescore and no redelivery because nothing could change.
+  Whether that's correct (the field exists for future use) or a real
+  gap (a scoring signal should exist and doesn't) is a product
+  decision, not something to guess at in code.
+- **`/update_cv` runs are tagged `trigger_source = 'onboarding'`.**
+  Whether a CV replacement by an already-onboarded user deserves its
+  own trigger source, the way preferences got one, is undecided.
+- **`normalize_location`'s locality limitation is real and unfixed.**
+  On 2026-09-23, 7 Delhi jobs scored `location = 0.0` for user 13
+  despite both being in Delhi ("Sansad Marg, New Delhi", "South Delhi,
+  Delhi", "Maurya Enclave, North West Delhi" vs. the user's plain
+  "Delhi" preference) — a locality-vs-city string mismatch, not a
+  false negative on the city itself. Remote jobs score 1.0 regardless
+  of city, which is an intentional rule, not related to this gap. The
+  Day 6 rule that two users of one location-matching implementation
+  must share it (rather than one growing a special case) constrains
+  any fix here.
+- **Pre-existing log hygiene left alone, five sites**, per this stage's
+  own hard rule not to touch them: `notification_delivery.py:577, 623,
+634` (`logger.exception`), `app/bot/handlers/onboarding.py:348` and
+  `app/bot/handlers/preferences.py:85` (`logger.debug(...,
+exc_info=True)`). Same leak shape as the two sites fixed this Day —
+  not yet fixed themselves.
+- **Unexplained: scoring run 33 printed no `jobs_remote` line; run 34,
+  same inputs, printed `jobs_remote 5`.** Not chased further this Day.
+- **Environment flake, not reproduced:**
+  `test_the_notify_branch_delivers_and_records_an_attempt` failed once
+  with "server closed the connection unexpectedly" against the Neon
+  test database; passed on two immediate reruns. Recorded rather than
+  dismissed, per this project's own rule about single unexplained
+  failures.
+- **No real (non-synthetic) job currently clears all three
+  notification gates for any user at the default 0.6 threshold.** The
+  best real score observed for user 13 is roughly 0.57, with
+  `weight_covered` capping out around 0.50. This Day's live
+  verification proves the instant path itself works end to end; it
+  does not mean a real job will trigger it. The causes are already on
+  record and are not new: the enrichment quota backlog (§10), the
+  empty `adzuna_query_keywords` / `adzuna_query_locations` (§10), and
+  the `normalize_location` locality limitation immediately above.

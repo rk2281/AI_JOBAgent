@@ -303,6 +303,30 @@ class CVRepository:
             )
         )
 
+    async def record_embedding_error_without_attempt(
+        self,
+        version_id: int,
+        error: str,
+    ) -> None:
+        """Write a diagnostic error WITHOUT counting it as an attempt.
+
+        Used only by embed_cv_version's onboarding-time path. Calling
+        mark_version_embedding_failed here instead would take
+        embedding_attempts 0 -> 1, and
+        list_active_versions_needing_embedding's default
+        `attempts == 0` filter would then exclude this row from every
+        future nightly sweep after exactly one onboarding-time failure
+        -- worse than never having tried. This keeps the row eligible
+        for the ordinary nightly backstop instead of quietly opting it
+        out. The nightly sweep's own failures still go through
+        mark_version_embedding_failed, unchanged.
+        """
+        await self._session.execute(
+            update(CVVersion)
+            .where(CVVersion.id == version_id)
+            .values(embedding_error=error)
+        )
+
     async def active_version(self, user_id: int) -> CVVersion | None:
         """The active CV version, embedded or not. FOR REPORTING ONLY.
 

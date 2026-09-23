@@ -64,18 +64,48 @@ _EXPIRED_REPLY = BotReply(text="That button has expired. Send /preferences to tr
 class PreferencesEditOutcome:
     """What handling one preferences interaction produced.
 
-    Same shape and same reason as onboarding's DocumentOutcome and
-    CallbackOutcome: `answered` is True only when a value was actually
-    saved, so the handler can decide whether to echo a tapped choice
-    onto the message it answered without needing to parse `reply.text`
-    to find out.
+    `answered` is the same signal as onboarding's DocumentOutcome and
+    CallbackOutcome: True only when a value was actually saved, so the
+    handler can decide whether to echo a tapped choice onto the message
+    it answered without needing to parse `reply.text` to find out.
+
+    `user_id` and `recommendation_trigger` are Day 16's addition, same
+    shape as DocumentOutcome.user_id: a plain value the SERVICE decided,
+    for a HANDLER to act on without importing anything CV- or
+    scoring-related itself (see this file's own module docstring and
+    tests/test_preferences_service_isolation.py -- this service must
+    never import app.services.job_scoring, app.services.
+    notification_delivery, or app.integrations, so it cannot schedule
+    the instant recommendation itself; it only reports whether one is
+    warranted).
+
+    recommendation_trigger is None (no run), "rescore" (a score-
+    affecting field changed: target_roles or preferred_locations), or
+    "deliver_only" (only the gate changed: notification_threshold --
+    see job_scoring.py's score_experience/score_location/score_title,
+    none of which read notification_threshold, and
+    notification_delivery.evaluate_candidates, which reads it fresh at
+    delivery time). The experience bracket (min_/max_experience_years)
+    is never a trigger: nothing in app.services.scoring_signals or
+    app.services.job_scoring reads either field, so a rescore or a
+    redelivery after changing it could not change anything -- see
+    CLAUDE.md's Day 16 entry for the open question this leaves on
+    record rather than quietly answers.
     """
 
-    __slots__ = ("reply", "answered")
+    __slots__ = ("reply", "answered", "user_id", "recommendation_trigger")
 
-    def __init__(self, reply: BotReply, answered: bool = False) -> None:
+    def __init__(
+        self,
+        reply: BotReply,
+        answered: bool = False,
+        user_id: int | None = None,
+        recommendation_trigger: str | None = None,
+    ) -> None:
         self.reply = reply
         self.answered = answered
+        self.user_id = user_id
+        self.recommendation_trigger = recommendation_trigger
 
 
 class PreferencesService:
@@ -215,6 +245,10 @@ class PreferencesService:
         preferences.max_experience_years = maximum
         await self._session.flush()
 
+        # recommendation_trigger is deliberately left at its default,
+        # None -- neither field is read by any scoring signal, so no
+        # run could change anything. See PreferencesEditOutcome's
+        # docstring.
         return PreferencesEditOutcome(
             reply=BotReply(text=f"✅ Updated: {value} years of experience."),
             answered=True,
@@ -253,11 +287,13 @@ class PreferencesService:
         return PreferencesEditOutcome(
             reply=BotReply(text=f"✅ Updated: alert threshold {threshold:.2f}."),
             answered=True,
+            user_id=user.id,
+            recommendation_trigger="deliver_only",
         )
 
     # -- free-text answers ------------------------------------------------
 
-    async def handle_text(self, telegram_id: int, text: str) -> BotReply:
+    async def handle_text(self, telegram_id: int, text: str) -> PreferencesEditOutcome:
         """Save a free-text answer for whichever field is pending.
 
         Only called by the router when it has already confirmed
@@ -265,10 +301,19 @@ class PreferencesService:
         the user row itself rather than trusting the caller, since a
         service should not depend on a caller having checked what it
         can check itself.
+
+        Returns PreferencesEditOutcome, not a bare BotReply, for the
+        same reason handle_callback does: both target_roles and
+        preferred_locations are score-affecting fields (see
+        PreferencesEditOutcome's docstring), and the router needs
+        recommendation_trigger to decide whether to schedule an instant
+        rescore. Before Day 16 this returned BotReply and the save
+        signal was dropped at this exact boundary -- route_text's own
+        docstring calls this out.
         """
         user = await self._users.get_by_telegram_id(telegram_id)
         if user is None:
-            return _UNKNOWN_USER_REPLY
+            return PreferencesEditOutcome(reply=_UNKNOWN_USER_REPLY)
 
         # Wrapped into the enum once and compared by identity from here
         # on -- the same convention OnboardingState uses throughout this
@@ -281,28 +326,44 @@ class PreferencesService:
         if field is PendingPreferenceField.ROLES:
             roles = parse_list_input(text)
             if not roles:
-                return BotReply(
-                    text="I didn't catch any roles there. Try: "
-                    "Backend Engineer, ML Engineer"
+                return PreferencesEditOutcome(
+                    reply=BotReply(
+                        text="I didn't catch any roles there. Try: "
+                        "Backend Engineer, ML Engineer"
+                    )
                 )
             preferences.target_roles = roles
             await self._users.set_pending_preference_field(user, None)
             await self._session.flush()
-            return BotReply(text=f"✅ Updated target roles: {', '.join(roles)}.")
+            return PreferencesEditOutcome(
+                reply=BotReply(text=f"✅ Updated target roles: {', '.join(roles)}."),
+                answered=True,
+                user_id=user.id,
+                recommendation_trigger="rescore",
+            )
 
         if field is PendingPreferenceField.LOCATIONS:
             locations = parse_list_input(text)
             if not locations:
-                return BotReply(
-                    text="I didn't catch any locations. Try: Delhi, Noida, Gurgaon"
+                return PreferencesEditOutcome(
+                    reply=BotReply(
+                        text="I didn't catch any locations. Try: Delhi, Noida, Gurgaon"
+                    )
                 )
             preferences.preferred_locations = locations
             await self._users.set_pending_preference_field(user, None)
             await self._session.flush()
-            return BotReply(text=f"✅ Updated locations: {', '.join(locations)}.")
+            return PreferencesEditOutcome(
+                reply=BotReply(text=f"✅ Updated locations: {', '.join(locations)}."),
+                answered=True,
+                user_id=user.id,
+                recommendation_trigger="rescore",
+            )
 
         # Not actually reachable through the router's own contract --
         # it only calls here when pending_preference_field is set --
         # but this service does not trust that and must say something
         # sane if it is ever called anyway.
-        return BotReply(text="Nothing is pending. Send /preferences to change something.")
+        return PreferencesEditOutcome(
+            reply=BotReply(text="Nothing is pending. Send /preferences to change something.")
+        )

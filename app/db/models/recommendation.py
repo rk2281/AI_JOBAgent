@@ -60,8 +60,31 @@ class NotificationStatus(str, enum.Enum):
 TRIGGER_SOURCE_SCHEDULED = "scheduled"
 TRIGGER_SOURCE_MANUAL_TEST = "manual_test"
 
+# The instant post-onboarding attempt: a user's first CV embed, score
+# and notify, fired once from the onboarding handler instead of
+# waiting for the next scheduled run_agent.py pass. Kept distinct from
+# "scheduled" for the same reason manual_test is -- so a human asking
+# "did the nightly gate send this" isn't misled by a row this path put
+# there instead.
+TRIGGER_SOURCE_ONBOARDING = "onboarding"
+
+# The preferences-triggered instant attempt: editing target roles,
+# preferred locations, or the alert threshold reschedules a
+# score-and-notify pass for that one user immediately (Day 16), instead
+# of waiting for the next scheduled run_agent.py pass. Kept distinct
+# from "onboarding" for the same reason that one is distinct from
+# "scheduled" -- a user asking "why did this arrive weeks after I
+# signed up" deserves a row that says preferences, not one that implies
+# it happened at signup.
+TRIGGER_SOURCE_PREFERENCES = "preferences"
+
 NOTIFICATION_TRIGGER_SOURCES = frozenset(
-    {TRIGGER_SOURCE_SCHEDULED, TRIGGER_SOURCE_MANUAL_TEST}
+    {
+        TRIGGER_SOURCE_SCHEDULED,
+        TRIGGER_SOURCE_MANUAL_TEST,
+        TRIGGER_SOURCE_ONBOARDING,
+        TRIGGER_SOURCE_PREFERENCES,
+    }
 )
 
 

@@ -100,10 +100,43 @@ class CallbackOutcome:
     DocumentOutcome.stored above, for the same reason — a plain
     BotReply cannot carry this distinction without the caller guessing
     it from the wording.
+
+    `user_id` and `recommendation_trigger` are Day 16's addition, same
+    shape and same reason as PreferencesEditOutcome's: only
+    _save_threshold's SUCCESS branch sets them, because reaching
+    COMPLETE is the one onboarding transition that can make a user
+    newly eligible for an instant score-and-notify pass with a real,
+    fully-answered UserPreference row. Every other callback step in
+    this class leaves them at None, so the handler
+    (app.bot.handlers.onboarding.button_callback) only ever schedules
+    one on that single transition.
     """
 
     reply: BotReply
     answered: bool = False
+    user_id: int | None = None
+    recommendation_trigger: str | None = None
+
+
+async def get_onboarding_state(
+    session: AsyncSession, user_id: int
+) -> OnboardingState | None:
+    """The current onboarding_state for a user_id, or None if they don't exist.
+
+    A plain module-level function rather than an OnboardingService
+    method, because every existing method on that class is keyed on a
+    telegram_id -- it is built around a live Update. This is for a
+    caller that only has the internal user_id, which is what CV
+    extraction hands back (app.services.cv_extraction.ExtractionResult).
+
+    Exists so app.bot.handlers.onboarding._try_instant_recommendation --
+    a background task, not a Telegram handler with an Update to read
+    from -- can ask this without importing UserRepository directly.
+    See app/db/repositories/__init__.py: "Services call repositories.
+    Handlers call services."
+    """
+    user = await UserRepository(session).get_by_id(user_id)
+    return OnboardingState(user.onboarding_state) if user is not None else None
 
 
 def parse_list_input(raw: str) -> list[str]:
@@ -540,6 +573,8 @@ class OnboardingService:
                 )
             ),
             answered=True,
+            user_id=user.id,
+            recommendation_trigger="rescore",
         )
 
     # -- prompts ----------------------------------------------------------

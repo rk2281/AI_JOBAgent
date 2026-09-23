@@ -23,7 +23,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.bot.rendering import tapped_button_label, to_markup
+from app.db.models.recommendation import TRIGGER_SOURCE_PREFERENCES
 from app.db.session import session_scope
+from app.services.notification_delivery import score_and_notify_user
 from app.services.preferences import PreferencesService
 
 logger = logging.getLogger(__name__)
@@ -87,3 +89,19 @@ async def preferences_callback(
         text=outcome.reply.text,
         reply_markup=to_markup(outcome.reply),
     )
+
+    if outcome.recommendation_trigger is not None and outcome.user_id is not None:
+        # Only reachable via a saved threshold answer today -- roles and
+        # locations are free-text and arrive through onboarding.
+        # text_message instead. See PreferencesEditOutcome's docstring
+        # for what each recommendation_trigger value means. Scheduled
+        # after the reply above, not awaited, same as every other
+        # background task in this project.
+        context.application.create_task(
+            score_and_notify_user(
+                outcome.user_id,
+                trigger_source=TRIGGER_SOURCE_PREFERENCES,
+                rescore=outcome.recommendation_trigger == "rescore",
+            ),
+            update=update,
+        )

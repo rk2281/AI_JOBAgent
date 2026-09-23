@@ -17,6 +17,8 @@ reads state that already lives on the User row.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.user import OnboardingState
@@ -26,7 +28,26 @@ from app.services.preferences import PreferencesService
 from app.services.replies import BotReply
 
 
-async def route_text(session: AsyncSession, telegram_id: int, text: str) -> BotReply:
+@dataclass(frozen=True)
+class TextRouteOutcome:
+    """What routing one text message produced, for the handler to act on.
+
+    Day 16's addition, same shape and same reason as onboarding's
+    DocumentOutcome: `reply` is what most callers want, and
+    `recommendation_trigger`/`user_id` are set ONLY when this text
+    turned out to answer a score-affecting /preferences question
+    (target_roles or preferred_locations, via PreferencesService.
+    handle_text) -- never when it answered an onboarding question.
+    Before this, route_text returned a bare BotReply and dropped
+    PreferencesEditOutcome's own signal at exactly this boundary.
+    """
+
+    reply: BotReply
+    user_id: int | None = None
+    recommendation_trigger: str | None = None
+
+
+async def route_text(session: AsyncSession, telegram_id: int, text: str) -> TextRouteOutcome:
     """Send a plain-text message to whichever service owns it.
 
     THE TIE-BREAK, made explicit rather than left to which `if` comes
@@ -54,9 +75,16 @@ async def route_text(session: AsyncSession, telegram_id: int, text: str) -> BotR
         # Onboarding wins: either there is no user yet, or onboarding
         # is not finished, and pending_preference_field -- whatever it
         # holds -- is not this router's concern until COMPLETE.
-        return await OnboardingService(session).handle_text(telegram_id, text)
+        reply = await OnboardingService(session).handle_text(telegram_id, text)
+        return TextRouteOutcome(reply=reply)
 
     if user.pending_preference_field is not None:
-        return await PreferencesService(session).handle_text(telegram_id, text)
+        outcome = await PreferencesService(session).handle_text(telegram_id, text)
+        return TextRouteOutcome(
+            reply=outcome.reply,
+            user_id=outcome.user_id,
+            recommendation_trigger=outcome.recommendation_trigger,
+        )
 
-    return await OnboardingService(session).handle_text(telegram_id, text)
+    reply = await OnboardingService(session).handle_text(telegram_id, text)
+    return TextRouteOutcome(reply=reply)

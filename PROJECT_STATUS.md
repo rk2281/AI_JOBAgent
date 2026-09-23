@@ -934,3 +934,154 @@ Fixed: `gemini.py:217` now calls `describe_genai_error(error)`,
 matching `gemini_enrichment.py` and `gemini_embeddings.py`. Pinned by
 a new test,
 `tests/test_cv_extraction.py::test_extract_profile_error_message_is_redacted`.
+
+### 5. End-to-end notification path verified live, not just by unit tests
+
+Two synthetic test jobs — 592 (user 14) and 593 (user 13) — were built
+from each user's real profile, preferences and CV embedding (all five
+signals engineered to 1.0; the embedding copied directly from the
+user's active `cv_versions` row, no live Gemini call). Both scored
+`final_score = 1.000`, cleared all three `is_notify_eligible()` gates,
+and were delivered as real Telegram messages, confirmed visually on
+both users' own devices — the first live confirmation of the full
+scoring → gate → delivery path, versus the Day 12 fixture-only
+confirmation recorded in §9 BUGS. Both jobs are now confirmed
+`is_active = false, is_excluded = false` (queried 2026-09-18), each
+with a one-line description note recording the test, and
+`embedding_model` / `skills_extraction_model` set to traceable
+`synthetic:copied-from-...` markers rather than a real model name.
+
+**Proposed, not yet designed in code:** score and notify a new user
+immediately after onboarding, using the job pool nightly
+ingestion/enrichment already maintains, rather than waiting for the
+next scheduled run — the CV just needs embedding (already automated,
+see §1 above) and scoring against the existing pool. CV-embedding
+failure handling at onboarding time (retry path, avoiding a silently
+stuck user) is an open design question, unresolved.
+
+### 6. Instant onboarding notification built, closing §10.5's proposal
+
+`app/bot/handlers/onboarding.py`'s `_extract_and_notify` now calls
+`_try_instant_recommendation(user_id, version_id)` (`onboarding.py:177`)
+once CV extraction reaches `ExtractionStatus.COMPLETE`. It runs
+`embed_cv_version()` -> `run_scoring()` -> `run_notification_delivery()`
+in sequence, all real production calls. Delivery is tagged
+`trigger_source="onboarding"`, a fourth value on
+`NOTIFICATION_TRIGGER_SOURCES` (`app/db/models/recommendation.py:69-72`)
+alongside `scheduled` and `manual_test`, so a row this path produced
+can never be mistaken for one the nightly gate sent.
+`run_notification_delivery()` gained a `trigger_source` parameter,
+default `TRIGGER_SOURCE_SCHEDULED` (`notification_delivery.py:641`);
+every pre-existing caller is unaffected.
+
+### 7. Decision: no `embedding_max_attempts` ceiling for CV embedding
+
+A ceiling mirroring `enrichment_max_attempts` (`config.py:492`) was
+designed, then not built. Lifetime `cv_versions` embedding history at
+the time of the check: `n=3` attempts, `3` successes, zero failures of
+any kind. A ceiling would guard against a failure mode that has never
+once occurred, on a population too small to have tested the existing
+`embedding_attempts == 0` filter against anything. Revisit only once a
+real CV-embedding failure is observed.
+
+### 8. `record_embedding_error_without_attempt()` keeps an onboarding failure eligible for the nightly backstop
+
+`CVRepository.record_embedding_error_without_attempt()`
+(`app/db/repositories/cv.py:306`) writes `embedding_error` without
+incrementing `embedding_attempts`. The nightly batch path still calls
+`mark_version_embedding_failed()` (which does increment) unchanged;
+`embed_cv_version()` (`app/services/cv_embedding.py:210`) is the only
+caller of the new method. Reusing `mark_version_embedding_failed()`
+here instead would take `embedding_attempts` `0 -> 1`, and the nightly
+sweep's default filter (`attempts == 0`) would then exclude that row
+from every future run after exactly one onboarding-time failure —
+worse than never having tried. The user sees no error either way:
+nothing on this path is load-bearing, and the nightly pass redoes it.
+
+### 9. End-to-end verification of the onboarding path, live, on two users
+
+User 14, a fresh unembedded `cv_versions` row (id 19, a non-destructive
+copy of the real active version 17), one synthetic job (id 594) built
+from the user's own real profile/preferences — same pattern as §10.5's
+jobs 592/593. `_try_instant_recommendation(14, 19)` called exactly as
+it exists in production code. Repeated for user 13: a fresh unembedded
+`cv_versions` row (id 20, copy of the real active version 18), one
+synthetic job (id 595), `_try_instant_recommendation(13, 20)`. Both
+confirmed via an independent fresh-connection query afterward:
+`cv_versions.embedding` populated, a `recommendations` row
+(`final_score = 1.0`), a `notifications` row
+(`trigger_source = 'onboarding'`, `status = 'SENT'`). The real
+`run_notification_delivery()` return value, captured by a transparent
+spy around the unmodified function (since `_try_instant_recommendation`
+itself discards it), reported `sent: 1` both times. Cleanup in a
+`finally` for each: job 594 / 595 set `is_active=false`,
+`profiles.active_cv_version_id` reverted to 17 / 18 respectively.
+
+### 10. Credential leak (incident thirteen) and rotation
+
+A Neon Postgres host, username and plaintext password leaked into a
+tool-output traceback — not from reading `.env`, but from a failing
+`psycopg` connection call's local variables, surfaced because
+`tests/integration/conftest.py` never set
+`WindowsSelectorEventLoopPolicy` on Windows before this session.
+Rotated on the Neon dashboard immediately; every other session
+transcript and temp task-output file were searched afterward and came
+back clean. This session's own live transcript file had it 4 times and
+was left in place rather than hand-edited mid-session, since editing a
+running session's own history risks corrupting it for a benefit that
+mostly disappears once the credential is inert. The `conftest.py`
+event-loop gap is fixed.
+
+### 11. Day 16 — preferences-triggered instant notification, live-verified end to end
+
+`score_and_notify_user` (`app/services/notification_delivery.py`) is
+now the one shared implementation behind both the onboarding instant
+path and a new preferences-triggered one: editing target roles or
+locations schedules a rescore, editing the alert threshold schedules a
+deliver-only pass (nothing in scoring reads `notification_threshold`,
+so a threshold-only edit cannot change any stored score), and editing
+the experience bracket schedules nothing (no scoring signal reads
+either experience field — an open question, not a bug). An in-process
+per-user coalescing guard prevents two triggers landing on the same
+user from racing; a crash inside one run does not leave the user
+stuck "in flight" for a second call. A real onboarding-completion-
+ordering defect was fixed: a user could reach onboarding COMPLETE
+before their CV finished embedding, and the Day 15 live verification
+never exercised that ordering because it called
+`_try_instant_recommendation` directly with preferences already filled
+in.
+
+Live-verified on 2026-09-23 against the real production database and a
+real Telegram chat, not a fixture: job 695, a clone of job 593, cloned
+onto user 13's real profile so it scores 1.0 on every signal. Tapping
+the `/preferences` alert-threshold button from 0.6 to 0.7 produced
+exactly one new `notifications` row (id 24, `status='SENT'`,
+`trigger_source='preferences'`), no new `scoring_runs` row (deliver-
+only, as designed), and a real Telegram message — matching a written-
+down-in-advance prediction exactly. Tapping back to 0.6 afterward
+produced nothing at all: `select_notifiable()`'s `already_sent` check
+skips a pair that already has a `SENT` row, so a second send is
+structurally unreachable, not merely unlikely — also matching the
+prediction. Job 695 deactivated and user 13's preferences restored to
+their pre-test values afterward, both confirmed by a fresh read.
+
+A credential-leak near-miss was caught before it shipped:
+`logger.exception` in `score_and_notify_user`'s except block would
+have written a rejected Telegram bot token straight into the bot's own
+logs (`python-telegram-bot`'s `InvalidToken` embeds the token in its
+message). Fixed there, and the same hardening applied to
+`_try_instant_recommendation`'s CV-embed step, which is exactly the
+shape that produced incident thirteen (§10) — a database connection
+failure whose exception message can carry a host, a username and a
+plaintext password. Both sites now log only `type(exc).__name__` and
+identifying ids, never `exc_info` or `str(exc)`.
+
+**Open:** no real (non-synthetic) job currently clears all three
+notification gates for any user at the default 0.6 threshold — the
+best real score for user 13 is roughly 0.57, with `weight_covered`
+capping out around 0.50. The instant path itself works, live-verified
+above; there is simply nothing real yet for it to send. The causes are
+already on record elsewhere and are not new: the enrichment quota
+backlog (§10.2, PROJECT_STATUS §9), empty
+`adzuna_query_keywords`/`adzuna_query_locations` (CLAUDE.md Day 13),
+and the `normalize_location` locality limitation (CLAUDE.md Day 16).
