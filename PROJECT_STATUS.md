@@ -1085,3 +1085,7 @@ already on record elsewhere and are not new: the enrichment quota
 backlog (§10.2, PROJECT_STATUS §9), empty
 `adzuna_query_keywords`/`adzuna_query_locations` (CLAUDE.md Day 13),
 and the `normalize_location` locality limitation (CLAUDE.md Day 16).
+
+### 12. Day 16b — the roles/locations rescore branch delivered a real Adzuna job live
+
+See CLAUDE.md §13, "Closed by Day 16" / "Open after Day 16" / "Findings (process) — Day 16b" for the full record: job 19 delivered live via `/preferences`, the coalescing guard and `already_sent` check both verified on a real job, a dead Adzuna apply link traced to `job_retire_after_days`' `last_seen_at`/interlock mechanism, and three Stage C process-error false starts.

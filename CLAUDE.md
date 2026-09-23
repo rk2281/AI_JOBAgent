@@ -178,7 +178,7 @@ the end, and returns a dict of counters. `run_ingestion`,
 | Workflow                    | `app/workflows/` — 8 nodes, 3 conditional edges; runs persisted to `agent_runs`                                                                                                                                                                                                                                                                                                     |
 | Jobs                        | 695 total (689 real + 6 `synthetic_test`, verified live Day 16), all embedded, 1 excluded (job 2)                                                                                                                                                                                                                                                                                   |
 | CV versions                 | 3 active, all embedded                                                                                                                                                                                                                                                                                                                                                              |
-| Enriched jobs               | 5, of which 2 produced skills                                                                                                                                                                                                                                                                                                                                                       |
+| Enriched jobs               | 130 with `skills_extracted_at` not null, of which 74 produced at least one skill (measured live 2026-09-23, Day 16b; previously recorded as "5, of which 2" — stale, not a regression, just never updated as enrichment kept running)                                                                                                                                               |
 | Jobs with experience bounds | 0                                                                                                                                                                                                                                                                                                                                                                                   |
 | Active scoring signals      | **3 of 5**                                                                                                                                                                                                                                                                                                                                                                          |
 | Notifications sent          | includes real `trigger_source = 'preferences'` and `'onboarding'` deliveries as of Day 16, in addition to `manual_test` — **the scheduled nightly gate itself has still sent 0**                                                                                                                                                                                                    |
@@ -1051,6 +1051,85 @@ name, so neither can later be mistaken for a genuine Gemini result.
   not code. Rule for future live-verification stages: the human
   completes the phone step and waits first, then sends confirmation
   — never the reverse.
+- **`files (1).zip` was found sitting at the repo root, gitignored
+  (`.gitignore`'s `*.zip`) and therefore invisible to a routine `git
+status`, even with `--untracked-files=all`.** `verify_archive.py`
+  flagged it FORBIDDEN before anything was shared: it contained a
+  nested `AI_JOB_HUNT_AGENT_day12.zip` (148,212 bytes) alongside
+  `DAY_12_REPORT.md`, `TEST_RESULTS.md`, and `MVP_LIMITATIONS.md` — the
+  nested archive's name and size make it most likely the incident
+  twelve archive itself (§9), left behind rather than a fresh leak.
+  The nested zip was never inspected further — `verify_archive.py`
+  does not recurse into one — so its own contents remain unconfirmed.
+  Deleted by hand rather than shared or extracted.
+- **The roles/locations rescore branch of the instant path delivered a
+  REAL Adzuna job live, 2026-09-23.** Job 19 ("Assistant Manager -
+  Python Development", BNP Paribas, Bangalore, Karnataka) was
+  delivered to user 13 as `notifications` id 25, `status = 'SENT'`,
+  `trigger_source = 'preferences'`, from `scoring_runs` id 37
+  (`started 09:41:32`, `finished 09:42:56` UTC), Match 73%
+  (`final_score = 0.7259608719211588`). Every prediction made before
+  the phone step — the notification row, its fields, the scoring run
+  id, and the score — matched the actual read exactly.
+- **Location edits (`scoring_runs` 38, 39) and the restore edits (40, 41) sent nothing, verifying `select_notifiable()`'s `already_sent`
+  check live on a real job, not only a synthetic one.** Run 39
+  (final Bangalore preferences) still found job 19 eligible
+  (`final_score = 0.9134608719211588`) but skipped it as already sent
+  rather than sending a duplicate, because one `SENT` row already
+  existed for the pair from run 37's delivery.
+- **The in-process coalescing guard
+  (`_in_flight_users`/`_rerun_needed_users` in `score_and_notify_user`)
+  was observed live, twice.** Two `/preferences` edits landing roughly
+  a minute apart, on two separate occasions, each produced exactly two
+  sequential `scoring_runs` rows with the second starting about 3
+  seconds after the first finished (39 after 38; 41 after 40) — never
+  overlapping, consistent with the second edit's trigger being folded
+  into the first call's rerun loop rather than two independent runs
+  racing each other.
+- **`scripts/preference_match_probe.py`: read-only, no writes, no
+  Telegram, no Gemini.** Reads candidate jobs (`is_active`, not
+  excluded, non-`synthetic_test`, `skills_extracted_at` not null, no
+  `SENT` row) joined to their stored `recommendations` row for a
+  given user; keeps the CV-derived skill/semantic/experience signals
+  as stored and recomputes only title/location/quality/`combine()`/
+  `is_notify_eligible()` through the real functions, never
+  reimplemented — including the real `parse_list_input` for typed
+  free-text preferences, so the stored form of a typed string is
+  guaranteed to match what `/preferences` would actually store.
+  Self-check: reconstructs the stored `final_score` for 7 rows under a
+  user's CURRENT preferences, delta `0.000e+00` against a `1e-9`
+  tolerance for all 7. Also runs a whole-pool simulation over every
+  candidate under a hypothetical preferences state. Cannot call
+  `select_notifiable()` on a hypothetical state — it reads stored
+  preferences/recommendations directly with no override parameter — so
+  the probe does not model `_GATE_WINDOW` or
+  `max_notifications_per_user`; it says so explicitly rather than
+  silently approximating them.
+- **Restore confirmed.** User 13's `user_preferences` row matches the
+  Stage B baseline field by field (`target_roles`,
+  `preferred_locations`, `remote_only`, `min_experience_years`,
+  `max_experience_years`, `notification_threshold`), and job 19's
+  stored `recommendations` row returned to
+  `final_score = 0.5384608719211589` — the same value Stage A's
+  self-check had already measured for this pair under the original
+  preferences.
+- **Commit `ed37720` (2026-09-23 12:58 IST, 61 files) audited,
+  read-only, and closed.** It was made with VS Code's auto-message
+  commit button, the same tool behind the previous 10 commits. Findings:
+  `.env` was never committed on any branch — only `.env.example` ever
+  was; no `storage/`, `logs/`, `*.zip`, `*.pdf` or `*.docx` has ever
+  been committed, anywhere in history; the 39 scratch files added in
+  `ed37720` (`check_url.py`, `scratch_query.py`, `scratch_users.py`, 36
+  `q_*.sql` files) hold 0 credentials and 0 personal data by pattern
+  scan; the remote URL holds no embedded credentials. The auto-tool's
+  bracket label is unreliable as a signal of what a commit touched —
+  `c800eed`'s "chore(.env)" bracket named `.env.example`, not `.env`,
+  and a second commit's "chore(cv_text)" bracket named a source file
+  (`app/services/cv_text.py`), not a document. **Rule going forward:
+  never click Commit or Sync in VS Code while an agent is working** —
+  a mid-session auto-commit stages and ships whatever the working tree
+  holds at that instant, without the review this audit just did by
+  hand.
 
 ### Do not "fix" these either — additions to section 1
 
@@ -1115,3 +1194,95 @@ exc_info=True)`). Same leak shape as the two sites fixed this Day —
   record and are not new: the enrichment quota backlog (§10), the
   empty `adzuna_query_keywords` / `adzuna_query_locations` (§10), and
   the `normalize_location` locality limitation immediately above.
+  **Still true under user 13's real, untouched preferences — Day 16b
+  confirms rather than overturns this.** A real job (19) clears all
+  three gates only when `target_roles`/`preferred_locations` are set
+  through `/preferences` to match it exactly; under the account's
+  actual, restored preferences (`Backend Engineer` / `Delhi`), job
+  19's own `final_score` is `0.538460872`, still short of 0.6.
+- **A delivered job's apply link was dead, and the code explains
+  exactly why `is_active` didn't already catch it.** Job 19's Adzuna
+  apply link returned "Page not found" on 2026-09-23, 23 days after
+  ingestion (`created_at = 2026-08-31 16:47:47`) — yet
+  `is_active = true`. `job_retire_after_days` (default 21,
+  `app/core/config.py:150`) is the retirement mechanism, applied only
+  inside `_retire_stale_jobs()`
+  (`app/services/job_ingestion.py:478-523`), called once per ingestion
+  run (`app/services/job_ingestion.py:322`) — never on the nightly
+  scoring/notification pass, never on any separate schedule. It marks
+  a job inactive only if `last_seen_at` (not `created_at`) is older
+  than the cutoff, via `JobRepository.retire_unseen_since()`
+  (`app/db/repositories/job.py:113-133`), and only if a successful
+  ingestion run occurred within the last
+  `job_retire_requires_run_within_days` (default 3,
+  `app/core/config.py:154`) — the interlock that stops one missed week
+  from silently retiring the whole table (see §10's `_retire_stale_jobs`
+  docstring). Traced with real data, not guessed: job 19's
+  `last_seen_at = 2026-08-31 16:57:49` (seen once, 10 minutes after
+  creation, never returned by an Adzuna search again). The last
+  ingestion run, id 11, started `2026-09-21 04:18:27`; its cutoff was
+  `2026-08-31 04:18:27`, and job 19's `last_seen_at` was still
+  ~12h39m inside that cutoff, so run 11 correctly left it active
+  (`retired = 0`, confirmed from the row). Job 19 crossed the
+  21-day-unseen line about 12 hours later, on 2026-09-21 ~16:57:49 —
+  after run 11 had already finished checking. The scheduled
+  `AIJobHuntAgentIngestion` task has not run since
+  (`NextRunTime = 2026-09-27`), so nothing has re-evaluated retirement
+  since job 19 became eligible for it. Not a bug: the check ran, was
+  correct at the moment it ran, and simply hasn't run again since the
+  job crossed the line. **Corrects a misattribution made earlier in
+  this same test sequence** — an intermediate Stage C report cited
+  this mechanism as "CLAUDE.md §1"; it is not a §1 row, it is
+  documented in `app/core/config.py:150`, `app/db/models/job.py:104`,
+  and `docs/Day_6_JobIngestion.md:461-465`. **Options are a product
+  decision, not decided here:** shorten `job_retire_after_days`, add a
+  link-liveness check before send, or deactivate jobs missing from a
+  later ingestion pass by some signal other than `last_seen_at`.
+- **Every `/preferences` roles or locations edit triggers a full
+  rescore even when the typed value equals the value already
+  stored.** `PreferencesService.handle_text` never compares old
+  against new before setting `preferences.target_roles = roles` /
+  `preferences.preferred_locations = locations` and returning
+  `recommendation_trigger = "rescore"` — confirmed live: retyping
+  "Delhi" (the value already stored) produced `scoring_runs` id 38
+  exactly like every other edit. Each rescore in this Day 16b sequence
+  took 84-128 seconds against 689 active jobs for one user (37: 84s;
+  38: 103s; 39: 87s; 40: 106s; 41: 128s). Not a bug — recorded as a
+  cost: a user editing back and forth pays a full rescore per tap
+  regardless of whether anything could actually change.
+- **Adzuna redirect URLs carry a `utm_source` query parameter that may
+  be the Adzuna `app_id`** — job 19's `url` is
+  `https://www.adzuna.in/details/5863071574?utm_medium=api&utm_source=5ee593b0`,
+  stored in `jobs.url` and sent verbatim in every notification link.
+  Deliberately unverified: not compared against `.env` or
+  `settings.adzuna_app_id`, and no credential was printed, per §3.
+  `app_key` does not appear to travel in these URLs. Already covered
+  by the pending Adzuna rotation (§7) — recorded as another place that
+  rotation should account for, not a new leak.
+
+### Findings (process) — Day 16b
+
+- **Three false starts in Stage C: once for Edit 1, twice for Edit
+  2 — a "done" confirmation was sent before the phone step had
+  actually happened.** Each time, the database reads correctly showed
+  no change: `user_preferences.updated_at` unchanged, no new
+  `scoring_runs` row, no new `notifications` row. The second Edit 2
+  attempt made it worse: the confirmation message itself claimed the
+  bot had replied "Updated target locations" — a claim that came from
+  a message template, not from the screen — producing a wrong "save
+  reply sent but write missing" hypothesis, withdrawn once a Telegram
+  screenshot showed no such reply had ever been sent. **Rule going
+  forward:** a phone-step confirmation must come from the screen — a
+  screenshot, or the bot's exact reply quoted with its own timestamp —
+  never from a pre-written template. And the first read after any
+  phone step should be `user_preferences.updated_at`: it is what
+  separates "nothing reached the bot" from a real persistence bug,
+  before any other read is worth running.
+- **The 2026-09-23 10:28 IST message for job 403 (Kuoni Tumlare, Match
+  55%, below the 0.6 threshold) is `notifications` id 23,
+  `trigger_source = 'manual_test'`.** Not a gate failure — see the
+  section 1 row on `scripts/send_test_notification.py --send`, which
+  delivers its top-ranked unsent candidate deliberately ungated,
+  specifically to test delivery independent of `is_notify_eligible()`.
+  It arrived from a manual test run, not from the scheduled nightly
+  pass or from anything in this Day 16b sequence.

@@ -17,7 +17,7 @@ CLAUDE.md is the rulebook. Stop and report after every step marked STOP.
 
 1. NEVER read, print, cat, or grep `.env`. Never ask me for any database URL.
 2. Scripts run as `python -m scripts.<name>`. SQL goes in a `.sql` file run
-   with `python -m scratch_query q_name.sql` (it COMMITS writes).
+   with `python -m scripts.query_file q_name.sql` (it COMMITS writes).
 3. Do not change any threshold, weight, floor, anchor, `_GATE_WINDOW`, or
    `THRESHOLD_CHOICES`. Do not insert, edit, or activate any job.
 4. Do not write to `user_preferences` yourself. I change preferences from my
@@ -142,5 +142,3 @@ Add to CLAUDE.md's Day 16 section:
 - Any mismatch between prediction and actual, as a finding.
 
 Do not commit. List new untracked files at the end.
-
-Read @prompts/day16b_real_job_via_preferences.md in full. Do Stage A only (read-only probe), then STOP and report.

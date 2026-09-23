@@ -12,6 +12,10 @@ run_log.txt
 storage/
 *.zip
 
+# One-off scratch queries run through scripts/query_file.py. Disposable
+# by nature; not meant to be committed one at a time.
+q_*.sql
+
 # Unattended run logs. Gitignored deliberately: an unattended log is
 # the one file nobody reviews before packing, and scripts/pack.ps1 can
 # only exclude what git already ignores.
